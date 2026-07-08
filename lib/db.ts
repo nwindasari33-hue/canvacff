@@ -1,21 +1,30 @@
 import { createClient } from "@libsql/client/web";
 
-const url = (globalThis as any).ENV.TURSO_DATABASE_URL;
-const authToken = (globalThis as any).ENV.TURSO_AUTH_TOKEN;
+let _dbClient: any = null;
 
-if (!url) {
-    throw new Error("TURSO_DATABASE_URL tidak ditemukan di environment variables");
-}
+const getDb = () => {
+    if (_dbClient) return _dbClient;
 
-// Inisialisasi klien Turso (LibSQL)
-// Digunakan untuk berinteraksi dengan database di seluruh aplikasi
-export const db = createClient({
-    url,
-    authToken,
-});
+    const env = (globalThis as any).ENV;
+    if (!env || !env.TURSO_DATABASE_URL) {
+        throw new Error("TURSO_DATABASE_URL tidak ditemukan di environment variables (Global ENV belum di-set)");
+    }
+
+    _dbClient = createClient({
+        url: env.TURSO_DATABASE_URL,
+        authToken: env.TURSO_AUTH_TOKEN,
+    });
+    return _dbClient;
+};
+
+// Export db proxy in case it's used directly
+export const db = new Proxy({}, {
+    get: (target, prop) => {
+        return getDb()[prop];
+    }
+}) as any;
 
 // Fungsi bantuan untuk menjalankan query SQL standar
-// Contoh penggunaan: await sql("SELECT * FROM users WHERE id = ?", [123]);
 export const sql = async (query: string, args: any[] = []) => {
     let attempts = 0;
     const maxRetries = 3;
@@ -23,13 +32,13 @@ export const sql = async (query: string, args: any[] = []) => {
     while (attempts < maxRetries) {
         attempts++;
         try {
-            const result = await db.execute({ sql: query, args });
+            const result = await getDb().execute({ sql: query, args });
             return result;
         } catch (error: any) {
             // Only retry on network/fetch errors
             if (attempts < maxRetries && (
-                error.message.includes("fetch failed") ||
-                error.message.includes("ConnectTimeoutError") ||
+                error.message?.includes("fetch failed") ||
+                error.message?.includes("ConnectTimeoutError") ||
                 error.code === "UND_ERR_CONNECT_TIMEOUT"
             )) {
                 console.warn(`⚠️ DB Retry ${attempts}/${maxRetries} due to network error...`);
@@ -41,6 +50,5 @@ export const sql = async (query: string, args: any[] = []) => {
             throw error;
         }
     }
-    // Fallback (should be unreachable due to throw)
     throw new Error("DB Connection Failed after retries");
 };
