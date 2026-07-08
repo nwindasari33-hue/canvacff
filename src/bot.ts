@@ -12,10 +12,10 @@ import { BackupService } from "./lib/backup";
 // Definisi Tipe Context Custom (jika perlu)
 type MyContext = Context;
 
-const token = process.env.BOT_TOKEN;
-if (!token) throw new Error("BOT_TOKEN hilang!");
+export let bot: Bot<MyContext>;
 
-export const bot = new Bot<MyContext>(token);
+export function initBot(token: string) {
+    bot = new Bot<MyContext>(token);
 
 // DEBUG COMMAND: Pure Telegram Response (No DB)
 bot.command("pingbot", async (ctx) => {
@@ -3042,3 +3042,5 @@ bot.callbackQuery("adm_set_donasi", async (ctx) => {
     );
     await ctx.answerCallbackQuery();
 });
+
+}

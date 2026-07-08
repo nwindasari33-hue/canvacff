@@ -1,5 +1,5 @@
 import { webhookCallback } from "grammy";
-import { bot } from "./bot";
+import { bot, initBot } from "./bot";
 
 export interface Env {
     BOT_TOKEN: string;
@@ -15,7 +15,11 @@ export interface Env {
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         // Polyfill ENV globally for bot.ts and db.ts
+        
         (globalThis as any).ENV = env;
+        if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in env!");
+        initBot(env.BOT_TOKEN);
+
 
         const url = new URL(request.url);
 
@@ -43,7 +47,11 @@ export default {
     },
 
     async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+        
         (globalThis as any).ENV = env;
+        if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in env!");
+        initBot(env.BOT_TOKEN);
+
 
         if (!env.GITHUB_PAT || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
             console.error("Missing GitHub Secrets in Cloudflare Worker environment.");
