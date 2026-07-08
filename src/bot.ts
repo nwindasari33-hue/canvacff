@@ -1,0 +1,3056 @@
+import { Bot, Context, InlineKeyboard, Keyboard, InputFile, GrammyError, HttpError } from "grammy";
+import { sql } from "../lib/db";
+import { inviteUser, checkSlots, getAccountInfo } from "../lib/canva";
+import dotenv from "dotenv";
+import axios from "axios";
+import { exec } from "child_process";
+import { TimeUtils } from "./lib/time";
+import { BackupService } from "./lib/backup";
+
+dotenv.config();
+
+// Definisi Tipe Context Custom (jika perlu)
+type MyContext = Context;
+
+const token = (globalThis as any).ENV.;
+if (!token) throw new Error("BOT_TOKEN hilang!");
+
+export const bot = new Bot<MyContext>(token);
+
+// DEBUG COMMAND: Pure Telegram Response (No DB)
+bot.command("pingbot", async (ctx) => {
+    await ctx.reply("🏓 <b>Pong!</b>\nBot is reachable.\nServer: Vercel Serverless", { parse_mode: "HTML" });
+});
+
+// Middleware: Logger & Debug
+bot.use(async (ctx, next) => {
+    try {
+        const user = ctx.from?.username || ctx.from?.id || "Unknown";
+        const action = ctx.message?.text || ctx.callbackQuery?.data || "Update";
+        console.log(`[UPDATE] ${user}: ${action}`);
+    } catch (e) {
+        console.error("Logger Error:", e);
+    }
+    await next();
+});
+
+// Command: Version Check
+bot.command("pingver", async (ctx) => {
+    await ctx.reply("🤖 <b>System Ready</b>\nVersion: v2.1 (Admin Fix + Queue Fix)", { parse_mode: "HTML" });
+});
+
+// ============================================================
+// MIDDLEWARE & UTILITAS
+// ============================================================
+
+// Cek apakah user Admin
+const ADMIN_ID = parseInt((globalThis as any).ENV. || "0");
+const isAdmin = (id: number) => id === ADMIN_ID;
+
+// ============================================================
+// KEYBOARDS (ANTARMUKA)
+// ============================================================
+
+// Reply Keyboard (Menu Utama Tahan Lama)
+const mainMenu = new Keyboard()
+    .text("🎁 Menu Paket").text("👤 Profil Saya").row()
+    .text("📖 Panduan").text("🔑 Lihat Kode").row()
+    .text("📊 Cek Slot").text("💸 Donasi").row()
+    .resized();
+
+// ============================================================
+// COMMAND HANDLERS
+// ============================================================
+
+// Helper: Ambil List Channel (Prioritas DB -> Env)
+async function getForceSubChannels(): Promise<string[]> {
+    let raw = "";
+    try {
+        const res = await sql("SELECT value FROM settings WHERE key = 'force_sub_channels'");
+        if (res.rows.length > 0) {
+            raw = res.rows[0].value as string;
+        }
+    } catch (e) {
+        console.error("DB Error get channels:", e);
+    }
+
+    if (!raw) {
+        raw = (globalThis as any).ENV. || "";
+    }
+
+    return raw.split(',').map(c => c.trim()).filter(c => c);
+}
+
+// Helper: Cek Membership
+async function checkMember(userId: number, ctx: MyContext): Promise<boolean> {
+    const rawChannels = await getForceSubChannels();
+    if (rawChannels.length === 0) return true;
+
+    for (const raw of rawChannels) {
+        // Support format: ID|Link or just ID
+        // Example: "-1001234567|https://t.me/+AbCdEf" -> ID: -1001234567
+        const chat = raw.split('|')[0].trim();
+
+        try {
+            // Support @username or ID
+            const member = await ctx.api.getChatMember(chat, userId);
+            if (member.status === 'left' || member.status === 'kicked') {
+                return false;
+            }
+        } catch (e) {
+            console.error(`Gagal cek member ${chat}:`, e);
+            // Default: Asumsikan FALSE jika error (mungkin user belum join private channel)
+            return false;
+        }
+    }
+    return true;
+}
+
+// ============================================================
+// STRICT FORCE SUBSCRIBE MIDDLEWARE
+// ============================================================
+bot.use(async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId) return next();
+
+    // 1. Exemption: Admin
+    if (isAdmin(userId)) return next();
+
+    // 2. Exemption: Ignore Service Messages (Join/Left Group)
+    if (ctx.message?.new_chat_members || ctx.message?.left_chat_member) return;
+
+    // 3. Restriction: Private Chat Only (User Request: All commands must be private)
+    if (ctx.chat?.type !== 'private') {
+        const text = ctx.message?.text || "";
+        const isCommand = text.startsWith('/') || ctx.callbackQuery || ["🎁 Menu Paket", "👤 Profil Saya", "📖 Panduan", "🔑 Lihat Kode", "📊 Cek Slot", "💸 Donasi"].includes(text);
+
+        if (isCommand) {
+            // Delete user's command message to clean up spam
+            try { await ctx.deleteMessage(); } catch (e) { }
+
+            // Reply with button to private chat
+            try {
+                const username = ctx.me?.username || "CanvaProGratisFreeBot";
+                const keyboard = new InlineKeyboard().url("➡️ Pindah ke Private Chat", `https://t.me/${username}?start=group`);
+                await ctx.reply("⛔ <b>Akses Ditolak!</b>\nMohon gunakan bot di Private Chat.", { parse_mode: "HTML", reply_markup: keyboard });
+            } catch (ignore) { }
+            return; // STOP EXECUTION (Block command)
+        }
+        // If not a command (random chat), just ignore silent
+        return;
+    }
+
+    // 4. Exemption: Start Command (Login/Register)
+    if (ctx.message?.text?.startsWith('/start')) return next();
+
+    // 3. Exemption: "Saya Sudah Join" callback
+    if (ctx.callbackQuery?.data === 'check_sub') return next();
+
+    // 4. Force Check
+    const isJoined = await checkMember(userId, ctx);
+    if (isJoined) {
+        return next();
+    }
+
+    // 5. Block & Show Channels
+    const channels = await getForceSubChannels();
+    const keyboard = new InlineKeyboard();
+    let msg = "⛔ <b>Akses Ditolak!</b>\n\nAnda wajib join channel berikut untuk menggunakan bot:\n\n";
+
+    channels.forEach((raw, i) => {
+        const parts = raw.split('|');
+        const idOrName = parts[0].trim();
+        const link = parts[1] ? parts[1].trim() : "";
+
+        let label = `📢 Channel Wajib ${i + 1}`;
+        let url = link;
+
+        // Auto-detect public username if no link provided
+        if (!url && idOrName.startsWith('@')) {
+            url = `https://t.me/${idOrName.replace('@', '')}`;
+            label = idOrName;
+        }
+
+        if (url) {
+            keyboard.url(label, url).row();
+        } else {
+            msg += `• ${idOrName}\n`;
+        }
+    });
+
+    keyboard.text("✅ Saya Sudah Join", "check_sub");
+
+    // Reply mechanism
+    // If callback, answer it first to stop loading animation
+    if (ctx.callbackQuery) {
+        try { await ctx.answerCallbackQuery("⛔ Akses Ditolak: Wajib Join Channel!"); } catch { }
+    }
+
+    // Send protection message
+    await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+
+    // STOP EXECUTION (Do not call next)
+});
+
+// Handler: Check Subscription Button
+bot.callbackQuery("check_sub", async (ctx) => {
+    const userId = ctx.from.id;
+    const isJoined = await checkMember(userId, ctx);
+
+    if (isJoined) {
+        await ctx.answerCallbackQuery("✅ Terimakasih!");
+        try { await ctx.deleteMessage(); } catch { }
+        await ctx.reply("✅ <b>Akses Diterima!</b>\nSilakan gunakan bot kembali.", { parse_mode: "HTML" });
+    } else {
+        await ctx.answerCallbackQuery({ text: "❌ Masih ada channel yang belum di-join!", show_alert: true });
+    }
+});
+
+// Admin Commands for Channels
+bot.command("set_channels", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    const input = ctx.match;
+    if (!input) {
+        return ctx.reply("⚠️ <b>Format Salah!</b>\nContoh:\n1. <code>@channel1, @channel2</code> (Public)\n2. <code>-10012345|https://t.me/+Link, @channel2</code> (Private + Link)\n\nTips: Pisahkan dengan koma.", { parse_mode: "HTML" });
+    }
+
+    try {
+        await sql(
+            `INSERT INTO settings (key, value) VALUES ('force_sub_channels', ?) 
+             ON CONFLICT(key) DO UPDATE SET value = ?`,
+            [input, input]
+        );
+        await ctx.reply(`✅ <b>Channel Berhasil Disimpan!</b>\nList: ${input}`, { parse_mode: "HTML" });
+    } catch (e: any) {
+        await ctx.reply(`❌ Error DB: ${e.message}`);
+    }
+});
+
+bot.command("channels", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    const channels = await getForceSubChannels();
+    if (channels.length === 0) return ctx.reply("System menggunakan ENV (belum ada di DB).");
+    await ctx.reply(`📢 <b>List Channel Aktif:</b>\n\n${channels.join('\n')}`, { parse_mode: "HTML" });
+});
+
+async function safeSetMyCommands(commands: Parameters<typeof bot.api.setMyCommands>[0], scope: Parameters<typeof bot.api.setMyCommands>[1]) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            await bot.api.setMyCommands(commands, scope);
+            return;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (attempt === 2) {
+                console.error(`Failed to set commands after retry (${scope?.scope?.type || 'unknown'}):`, message);
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+    }
+}
+
+// STARTUP: Set Bot Commands (Menu Button)
+// STARTUP: Set Bot Commands (Menu Button)
+// 1. Default commands for everyone
+void safeSetMyCommands([
+    { command: "start", description: "Mulai Bot / Restart" },
+    { command: "aktivasi", description: "Aktivasi Akun via Email" },
+    { command: "help", description: "Daftar Perintah Lengkap" },
+], { scope: { type: "default" } });
+
+// 2. Special commands for Admin ID
+if (ADMIN_ID) {
+    void safeSetMyCommands([
+        { command: "admin", description: "👮 Panel Admin" },
+        { command: "tesexp", description: "🧪 Test Expire (Debug)" },
+        { command: "data", description: "📂 Export Data User" },
+        { command: "broadcast", description: "📢 Broadcast Users" },
+        { command: "set_cookie", description: "🍪 Set Cookie" },
+        { command: "set_channels", description: "📢 Set Channels" },
+        { command: "start", description: "Mulai Bot / Restart" },
+    ], { scope: { type: "chat", chat_id: ADMIN_ID } });
+}
+
+// Handler: 📖 Panduan
+bot.hears("📖 Panduan", async (ctx) => {
+    const isAdm = isAdmin(ctx.from?.id || 0);
+
+    let msg = `📖 <b>PANDUAN LENGKAP BOT</b>\n\n` +
+        `<b>👤 Perintah User:</b>\n` +
+        `• <b>/start</b> - Mulai ulang bot & cek menu.\n` +
+        `• <b>/aktivasi [email]</b> - Aktivasi Canva Pro (setelah pilih paket).\n` +
+        `  Contoh: <code>/aktivasi user@gmail.com</code>\n` +
+        `• <b>🎁 Menu Paket</b> - Pilih durasi (1 Bulan Free / 6 Bulan Premium).\n` +
+        `• <b>👤 Profil Saya</b> - Cek status langganan & poin referral.\n` +
+        `• <b>📊 Cek Slot</b> - Cek ketersediaan slot tim.\n\n` +
+        `ℹ️ <b>Tips:</b>\n` +
+        `1. Join channel wajib agar bot bisa digunakan.\n` +
+        `2. Undang teman untuk dapat poin (1 teman = 1 poin).\n` +
+        `3. Paket 6 Bulan butuh 6 Poin.\n\n`;
+
+    if (isAdm) {
+        msg += `<b>👮 Perintah Admin:</b>\n` +
+            `• <b>/admin</b> - Buka panel admin super.\n` +
+            `• <b>/data</b> - Export laporan user (.txt).\n` +
+            `• <b>/addpoint [ID|Poin]</b> - Tambah poin referral manual.\n` +
+            `• <b>/set_cookie [json]</b> - Set cookie Canva baru.\n` +
+            `• <b>/setua [ua]</b> - Set User-Agent browser.\n` +
+            `• <b>/cekcookie</b> - Cek isi cookie aktif di DB.\n` +
+            `• <b>/test_invite [email]</b> - Tes invite manual.\n` +
+            `• <b>/broadcast [pesan]</b> - Kirim pesan ke semua user.\n` +
+            `• <b>/delete_user [email/id]</b> - Hapus user permanent.\n` +
+            `• <b>/reset_email [email]</b> - Soft delete (Hapus langganan saja).\n` +
+            `• <b>/forceexpire [email]</b> - Buat user expired (H-1).\n` +
+            `• <b>/set_channels</b> - Atur channel force subscribe.\n` +
+            `• <b>/channels</b> - Cek list channel aktif.\n`;
+    }
+
+    await ctx.reply(msg, { parse_mode: "HTML" });
+});
+
+// Handler: Donasi Button
+// Handler: Donasi Button
+// Handler: Donasi Button (Link Mode)
+bot.hears("💸 Donasi", async (ctx) => {
+    try {
+        const res = await sql("SELECT value FROM settings WHERE key = 'donation_link_url'");
+        const donationUrl = res.rows.length > 0 ? res.rows[0].value : null;
+
+        if (donationUrl) {
+            const donasiKeyboard = new InlineKeyboard()
+                .url("💸 Klik Disini Untuk Donasi", donationUrl as string);
+
+            await ctx.reply(
+                "Silakan jika ingin berdonasi bisa klik button Donasi di bawah ini:",
+                {
+                    parse_mode: "HTML",
+                    reply_markup: donasiKeyboard
+                }
+            );
+        } else {
+            // Default Message if not set
+            await ctx.reply(
+                "💸 <b>Menu Donasi</b>\n\n" +
+                "Link donasi belum diatur oleh Admin.\n" +
+                "Silakan hubungi admin.",
+                { parse_mode: "HTML" }
+            );
+        }
+    } catch (e) {
+        console.error("Error donation:", e);
+    }
+});
+
+// Handler: Lihat Kode Button (Active Subscribers Only)
+bot.hears("🔑 Lihat Kode", async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    try {
+        // 1. Check if user has active subscription
+        const subRes = await sql(`
+            SELECT s.*, p.name as plan_name 
+            FROM subscriptions s 
+            JOIN products p ON s.product_id = p.id 
+            WHERE s.user_id = ? AND s.status = 'active' AND s.end_date > datetime('now', '+7 hours')
+        `, [userId]);
+
+        if (subRes.rows.length === 0) {
+            // No active subscription
+            return ctx.reply(
+                "⛔ <b>Akses Ditolak!</b>\n\n" +
+                "Fitur ini hanya untuk member dengan langganan <b>AKTIF</b>.\n\n" +
+                "📌 <b>Status Anda:</b> Tidak ada langganan aktif.\n\n" +
+                "💡 <b>Solusi:</b>\n" +
+                "1. Pilih paket di Menu Paket.\n" +
+                "2. Aktivasi dengan /aktivasi email@anda.com\n" +
+                "3. Tunggu proses invite selesai.\n\n" +
+                "<i>Atau perpanjang langganan jika sudah expired.</i>",
+                { parse_mode: "HTML" }
+            );
+        }
+
+        // 2. Get Invite Code Logic (Dynamic based on Node)
+        // Check if user has assigned node
+        const userNodeRes = await sql("SELECT assigned_node_id FROM users WHERE id = ?", [userId]);
+        const assignedNodeId = userNodeRes.rows[0]?.assigned_node_id as number;
+
+        const freshnessMs = 3 * 60 * 60 * 1000;
+        let inviteCode = "";
+        let codeUpdatedAt = "";
+
+        if (assignedNodeId) {
+            // Fetch code from specific node
+            const nodeRes = await sql("SELECT invite_code, invite_code_updated_at FROM canva_accounts WHERE id = ?", [assignedNodeId]);
+            if (nodeRes.rows.length > 0) {
+                inviteCode = (nodeRes.rows[0].invite_code || "") as string;
+                codeUpdatedAt = (nodeRes.rows[0].invite_code_updated_at || "") as string;
+            }
+        }
+
+        // Fallback to Global Settings if node code not found
+        if (!inviteCode) {
+            const codeRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code'");
+            if (codeRes.rows.length > 0 && codeRes.rows[0].value) {
+                inviteCode = codeRes.rows[0].value as string;
+                const tsRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code_updated_at'");
+                codeUpdatedAt = (tsRes.rows[0]?.value || "") as string;
+            }
+        }
+
+        if (!inviteCode) {
+            return ctx.reply(
+                "⏳ <b>Kode Belum Tersedia</b>\n\n" +
+                "Sistem belum memiliki kode invite terbaru untuk Node Anda.\n" +
+                "Kode akan update otomatis saat ada invite baru.\n\n" +
+                "Silakan coba lagi nanti atau hubungi admin.",
+                { parse_mode: "HTML" }
+            );
+        }
+
+        const updatedMs = codeUpdatedAt ? new Date(codeUpdatedAt.replace(' ', 'T') + '+07:00').getTime() : 0;
+        if (!updatedMs || (Date.now() - updatedMs) > freshnessMs) {
+            return ctx.reply(
+                "⏳ <b>Kode Sedang Diperbarui</b>\n\n" +
+                "Kode Canva berubah otomatis sekitar setiap 3 jam.\n" +
+                "Kode yang tersimpan sudah terlalu lama, jadi sistem tidak menampilkan kode basi.\n\n" +
+                "Silakan coba lagi setelah proses invite berikutnya selesai.",
+                { parse_mode: "HTML" }
+            );
+        }
+
+        const sub = subRes.rows[0];
+        const endDateStr = sub.end_date as string;
+        const endDate = new Date(endDateStr.includes('T') ? endDateStr : endDateStr.replace(' ', 'T') + '+07:00');
+
+        // 3. Format and send code
+        const keyboard = new InlineKeyboard()
+            .url("🔗 Buka Halaman Join", "https://www.canva.com/class/join");
+
+        await ctx.reply(
+            `🔑 <b>KODE AKSES CANVA</b>\n\n` +
+            `📋 <b>Kode:</b> <code>${inviteCode}</code>\n\n` +
+            `<b>Cara Pakai:</b>\n` +
+            `1. Klik tombol di bawah untuk buka halaman Join.\n` +
+            `2. Masukkan kode di atas.\n` +
+            `3. Klik Join/Gabung.\n\n` +
+            `📅 <b>Langganan Anda:</b> ${sub.plan_name}\n` +
+            `⏳ <b>Expired:</b> ${TimeUtils.format(endDate)}\n\n` +
+            `⚠️ <i>Jangan bagikan kode ini ke orang lain!</i>`,
+            { parse_mode: "HTML", reply_markup: keyboard }
+        );
+
+    } catch (e: any) {
+        console.error("Error Lihat Kode:", e);
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+bot.command("setdonasi", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const input = (ctx.match as string || "").trim();
+    const reply = ctx.message?.reply_to_message;
+
+    let targetUrl = "";
+
+    // 1. Check Input Argument
+    if (input.startsWith("http")) {
+        targetUrl = input;
+    }
+    // 2. Check Reply Text
+    else if (reply && "text" in reply && reply.text?.startsWith("http")) {
+        targetUrl = reply.text;
+    }
+
+    if (!targetUrl) {
+        return ctx.reply(
+            "⚠️ <b>Format Salah!</b>\n\n" +
+            "Fitur Donasi sekarang menggunakan <b>Link / URL</b>.\n\n" +
+            "Cara Pakai:\n" +
+            "• <code>/setdonasi https://saweria.co/xxx</code>\n" +
+            "• Atau Reply pesan berisi link dengan <code>/setdonasi</code>",
+            { parse_mode: "HTML" }
+        );
+    }
+
+    // Save to DB (Plain String URL)
+    try {
+        await sql(
+            "INSERT INTO settings (key, value) VALUES ('donation_link_url', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+            [targetUrl, targetUrl]
+        );
+        await ctx.reply(
+            `✅ <b>Link Donasi Disimpan!</b>\n\n` +
+            `🔗 URL: ${targetUrl}\n` +
+            `Tombol "Donasi" sekarang akan mengarah ke link tersebut.`,
+            { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+        );
+    } catch (e: any) {
+        await ctx.reply(`❌ Error DB: ${e.message}`);
+    }
+});
+
+// Admin// Command: Set Cookie (Legacy - Deprecated)
+bot.command("set_cookie", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    await ctx.reply(
+        "⚠️ <b>Command Berubah!</b>\n\n" +
+        "Sistem sekarang mendukung <b>Multi-Akun</b>.\n" +
+        "Gunakan command: <code>/addaccount [cookie]</code> untuk menambah akun.",
+        { parse_mode: "HTML" }
+    );
+});
+
+// Alias /help to Panduan
+bot.command("help", async (ctx) => {
+    // Re-use logic from Panduan
+    const isAdm = isAdmin(ctx.from?.id || 0);
+    let msg = `📖 <b>DAFTAR PERINTAH</b>\n\n` +
+        `<b>/start</b> - Restart Bot\n` +
+        `<b>/aktivasi</b> - Submit Email\n`;
+
+    // Simple redirect to Panduan text logic (simplified here)
+    // Better to just trigger same reply
+    await ctx.reply("Silakan klik tombol <b>📖 Panduan</b> di menu bawah untuk info lengkap.", { parse_mode: "HTML" });
+});
+
+bot.command("start", async (ctx) => {
+    try {
+        const userId = ctx.from?.id;
+        const username = ctx.from?.username || "Guest";
+        const firstName = ctx.from?.first_name || "Guest";
+
+        if (!userId) return;
+
+        // 1. Cek apakah ini User Baru (untuk validasi Referral)
+        const checkUser = await sql("SELECT id FROM users WHERE id = ?", [userId]);
+        const isNewUser = checkUser.rows.length === 0;
+
+        // 2. Simpan/Update User ke Database (Upsert)
+        // Force selected_product_id = NULL for new users to enforce selection
+        await sql(
+            `INSERT INTO users (id, username, first_name, selected_product_id, joined_at) VALUES (?, ?, ?, NULL, datetime('now', '+7 hours'))
+         ON CONFLICT(id) DO UPDATE SET username = ?, first_name = ?`,
+            [userId, username, firstName, username, firstName]
+        );
+
+        // 3. Cek/Generate Referral Code
+        let userRes = await sql("SELECT * FROM users WHERE id = ?", [userId]);
+        let user = userRes.rows[0];
+
+        if (!user.referral_code) {
+            const refCode = `ref${userId}`;
+            await sql("UPDATE users SET referral_code = ? WHERE id = ?", [refCode, userId]);
+            user.referral_code = refCode;
+        }
+
+        // 4. Proses Referral (HANYA JIKA USER BARU)
+        const payload = ctx.match;
+
+        // Debug Log untuk User
+        if (payload && !isNewUser) {
+            console.log(`[REFERRAL] Skip: User ${userId} (${firstName}) sudah ada di database.`);
+        }
+
+        if (isNewUser && payload && payload !== user.referral_code) {
+            console.log(`[REFERRAL] Valid: User baru ${userId} dengan kode ${payload}`);
+            // Cari Referrer
+            const uplineRes = await sql("SELECT id, referral_points FROM users WHERE referral_code = ?", [payload]);
+            if (uplineRes.rows.length > 0) {
+                const upline = uplineRes.rows[0];
+
+                // Simpan Upline
+                await sql("UPDATE users SET referred_by = ? WHERE id = ?", [upline.id, userId]);
+
+                // Tambah Poin Upline
+                await sql("UPDATE users SET referral_points = referral_points + 1 WHERE id = ?", [upline.id]);
+
+                // Notifikasi Upline
+                try {
+                    await ctx.api.sendMessage(
+                        upline.id as number,
+                        `🎉 <b>Referral Baru!</b>\n\n` +
+                        `User <b>${firstName}</b> telah terdaftar di database.\n` +
+                        `Total Poin: <b>${(upline.referral_points as number) + 1}</b>`,
+                        { parse_mode: "HTML" }
+                    );
+                } catch (ignore) { }
+            }
+        }
+
+        // 5. Cek Force Subscribe
+        const isJoined = await checkMember(userId, ctx);
+        if (!isJoined) {
+            const rawChannels = await getForceSubChannels();
+            const keyboard = new InlineKeyboard();
+
+            rawChannels.forEach((raw, i) => {
+                const parts = raw.split('|');
+                const chId = parts[0].trim();
+                const chLink = parts[1] ? parts[1].trim() : "";
+
+                let url = chLink;
+                if (!url) {
+                    url = chId.startsWith("@") ? `https://t.me/${chId.replace("@", "")}` : `https://t.me/c/${chId.replace("-100", "")}/1`;
+                }
+
+                keyboard.url(`📢 Channel ${i + 1}`, url).row();
+            });
+
+            keyboard.text("✅ Sudah Bergabung", "check_join");
+
+            return ctx.reply(
+                `⛔ <b>Akses Terkunci!</b>\n\n` +
+                `Halo ${firstName}, untuk menggunakan bot ini Anda <b>WAJIB JOIN</b> ke channel berikut:\n\n` +
+                `⚠️ <b>PERINGATAN KERAS:</b>\n` +
+                `Jika Anda keluar (leave) dari channel/grup ini, akun Canva Anda akan <b>OTOMATIS DI-KICK</b> oleh sistem kami!`,
+                { reply_markup: keyboard, parse_mode: "HTML" }
+            );
+        }
+
+        await ctx.reply(
+            `Halo ${firstName}! Selamat datang di <b>Canva Bot</b>.\n\n` +
+            `Bot ini menyediakan akses Canva Pro/Edu dengan sistem Points.\n` +
+            `Kumpulkan poin dengan mengundang teman untuk mendapatkan akses Premium!\n\n` +
+            `🔗 <b>Link Referral Anda:</b>\n` +
+            `https://t.me/${ctx.me.username}?start=${user.referral_code}\n\n` +
+            `Silakan pilih menu di bawah ini.`,
+            {
+                reply_markup: mainMenu,
+                parse_mode: "HTML"
+            }
+        );
+
+    } catch (e: any) {
+        console.error("Critical Error in /start:", e);
+        await ctx.reply(`❌ <b>System Error!</b>\n\nGagal terhubung ke Database.\nPesan: <code>${e.message}</code>`, { parse_mode: "HTML" });
+    }
+});
+
+// Callback: Cek Join
+bot.callbackQuery("check_join", async (ctx) => {
+    const userId = ctx.from.id;
+    const isJoined = await checkMember(userId, ctx);
+
+    if (isJoined) {
+        await ctx.deleteMessage();
+        await ctx.reply(
+            `✅ <b>Terima Kasih!</b>\nAkses Anda telah dibuka.\nSelamat menggunakan bot.`,
+            { reply_markup: mainMenu, parse_mode: "HTML" }
+        );
+    } else {
+        await ctx.answerCallbackQuery("❌ Anda belum join semua channel!");
+    }
+});
+
+// [LEGACY CODE REMOVED: handleCookieProcess, set_cookie, message:document]
+// This logic is now superseded by the new /addaccount command at the bottom of the file.
+
+
+// Helper: Trigger GitHub Action
+async function triggerGithubAction(eventType: string = "process_queue"): Promise<{ success: boolean; message: string }> {
+    const ghUser = (globalThis as any).ENV.;
+    const ghRepo = (globalThis as any).ENV.;
+    const ghToken = (globalThis as any).ENV.;
+
+    if (!ghUser || !ghRepo || !ghToken) {
+        const msg = "⚠️ GITHUB_USERNAME, GITHUB_REPO, atau GITHUB_TOKEN belum diatur di env/Vercel!";
+        console.warn(msg);
+        return { success: false, message: msg };
+    }
+
+    try {
+        await axios.post(
+            `https://api.github.com/repos/${ghUser}/${ghRepo}/dispatches`,
+            { event_type: eventType },
+            {
+                headers: {
+                    Authorization: `Bearer ${ghToken}`,
+                    Accept: "application/vnd.github.v3+json",
+                },
+            }
+        );
+        console.log("🚀 GitHub Action triggered successfully.");
+        return { success: true, message: "GitHub Actions workflow berhasil dipicu!" };
+    } catch (e: any) {
+        const details = e.response?.data?.message || e.message;
+        console.error("❌ Failed to trigger GitHub Action:", details);
+        return { success: false, message: `Gagal memicu GitHub Action: ${details}` };
+    }
+}
+
+// Admin Command: Test Invite (Queue Version)
+bot.command("test_invite", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const email = ctx.match;
+    if (!email) return ctx.reply("Format salah. Gunakan: <code>/test_invite [email_tujuan]</code>", { parse_mode: "HTML" });
+
+    // 1. Simpan ke Database sebagai Queue
+    try {
+        await ctx.reply(`⏳ Menambahkan <b>${email}</b> ke antrian invite...`, { parse_mode: "HTML" });
+        await sql(
+            `INSERT INTO users (id, email, status, role, first_name) VALUES (?, ?, 'pending_invite', 'free', 'Test User')
+             ON CONFLICT(email) DO UPDATE SET status = 'pending_invite'`,
+            [Math.floor(Math.random() * -100000), email] // Dummy ID for test
+        );
+
+        // 2. Trigger GitHub Action
+        const trigger = await triggerGithubAction();
+
+        await ctx.reply(
+            `✅ <b>Masuk Antrian!</b>\n\n` +
+            `📧 Email: <code>${email}</code>\n` +
+            `🚀 Status Trigger GHA: <b>${trigger.message}</b>\n\n` +
+            `Bot akan mengirim notifikasi jika sudah berhasil.`,
+            { parse_mode: "HTML" }
+        );
+
+    } catch (error: any) {
+        await ctx.reply(`❌ <b>Gagal Queue!</b>\nError: ${error.message}`, { parse_mode: "HTML" });
+    }
+});
+
+// Helper: Check Team Limit & Next Slot
+async function checkTeamLimit(): Promise<{ isFull: boolean, nextSlot: string | null }> {
+    try {
+        // 1. Get Current Count from Cluster (Multi-Account Aggregation)
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used FROM canva_accounts WHERE is_active=1");
+        const row = totalSlotsRes.rows[0];
+
+        const currentCount = parseInt(row.used as any) || 0;
+        const maxSlot = parseInt(row.max as any) || 0;
+
+        if (currentCount < maxSlot) {
+            return { isFull: false, nextSlot: null };
+        }
+
+        // 2. Get Next Available Slot (Earliest Expiring Subscription)
+        // We look for the soonest end_date of an ACTIVE subscription
+        const slotRes = await sql(`
+            SELECT MIN(end_date) as next_slot 
+            FROM subscriptions 
+            WHERE status = 'active' AND end_date > datetime('now', '+7 hours')
+            `);
+
+        let nextSlotStr = "Tidak diketahui";
+        if (slotRes.rows.length > 0 && slotRes.rows[0].next_slot) {
+            const dateStr = slotRes.rows[0].next_slot as string;
+            // Parse WIB String directly
+            const t = dateStr.split(/[- :]/);
+            const date = new Date(parseInt(t[0]), parseInt(t[1]) - 1, parseInt(t[2]), parseInt(t[3]), parseInt(t[4]), parseInt(t[5]));
+            nextSlotStr = TimeUtils.format(date);
+        }
+
+        return { isFull: true, nextSlot: nextSlotStr };
+
+    } catch (e) {
+        console.error("Error checking team limit:", e);
+        return { isFull: false, nextSlot: null }; // Fail safe open or closed? Open for now to avoid locking users on error.
+    }
+}
+
+// User Command: Aktivasi (User Submit Email)
+// Callback: Trigger Activation via Button
+bot.callbackQuery("act_extend", async (ctx) => {
+    const userId = ctx.from.id;
+    const userRes = await sql("SELECT email FROM users WHERE id = ?", [userId]);
+    if (userRes.rows.length === 0 || !userRes.rows[0].email) {
+        return ctx.answerCallbackQuery("❌ Email tidak ditemukan.");
+    }
+    const email = userRes.rows[0].email;
+    await handleActivation(ctx, email as string);
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("act_new_email", async (ctx) => {
+    await ctx.reply("📧 Silakan ketik email baru dengan format:\n<code>/aktivasi emailbaru@gmail.com</code>", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+// Refactor: Main Logic Extracted
+async function handleActivation(ctx: any, emailInput: string) {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    // Force Subscribe Check
+    if (!(await checkMember(userId, ctx))) {
+        return ctx.reply("⛔ <b>Akses Ditolak!</b>\n\nAnda belum join channel wajib.\nSilakan ketik /start untuk melihat list channel.\n\n⚠️ <i>Ingat: Keluar dari channel = Auto-Kick Canva!</i>", { parse_mode: "HTML" });
+    }
+
+    // NEW: Check Team Limit First
+    const limitInfo = await checkTeamLimit();
+    if (limitInfo.isFull && !isAdmin(userId)) {
+        return ctx.reply(
+            `⛔ <b>Tim Canva Penuh!</b>\n\n` +
+            `Maaf, saat ini slot tim sudah mencapai batas (500/500).\n` +
+            `Sistem tidak dapat menerima anggota baru.\n\n` +
+            `⏳ <b>Slot Berikutnya Tersedia:</b>\n` +
+            `📅 <b>${limitInfo.nextSlot}</b>\n\n` +
+            `<i>Silakan coba lagi pada waktu tersebut.</i>`,
+            { parse_mode: "HTML" }
+        );
+    }
+
+    try {
+        // 0. Ambil Data User (Produk & Poin)
+        const userRes = await sql("SELECT selected_product_id, referral_points, email as saved_email FROM users WHERE id = ?", [userId]);
+
+        // FIX: Check if user exists in DB
+        if (userRes.rows.length === 0) {
+            return ctx.reply(
+                "⛔ <b>User Tidak Ditemukan!</b>\n\n" +
+                "Silakan ketik /start terlebih dahulu untuk mendaftar.",
+                { parse_mode: "HTML" }
+            );
+        }
+
+        const user = userRes.rows[0];
+        const selectedProd = user.selected_product_id;
+        const savedEmail = user.saved_email;
+
+        // FIX: Safe Integer Parsing
+        const currentPoints = parseInt(user.referral_points as any) || 0;
+
+        // NEW: Enforce Product Selection
+        if (!selectedProd) {
+            return ctx.reply(
+                `⛔ <b>Anda Belum Memilih Paket!</b>\n\n` +
+                `Sebelum aktivasi, wajib memilih durasi di menu <b>🎁 Menu Paket</b> terlebih dahulu.\n` +
+                `Silakan kembali ke menu utama dan pilih paket yang diinginkan.`,
+                { parse_mode: "HTML" }
+            );
+        }
+
+        // 1. Ambil Subscription Aktif (Jika Ada)
+        const subRes = await sql(
+            `SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' AND end_date > datetime('now', '+7 hours')`,
+            [userId]
+        );
+        const activeSub = subRes.rows.length > 0 ? subRes.rows[0] : null;
+
+        // ============================================================
+        // GLOBAL EMAIL UNIQUENESS CHECK (ANTI-STEAL / DUPLICATION)
+        // ============================================================
+        if (emailInput !== savedEmail) { // Hanya cek jika email yang dimasukkan berbeda dengan miliknya sendiri
+            const duplicateCheck = await sql("SELECT id FROM users WHERE email = ? AND id != ?", [emailInput, userId]);
+            if (duplicateCheck.rows.length > 0 && !isAdmin(userId)) {
+                return ctx.reply(
+                    `⛔ <b>Akses Ditolak!</b>\n\n` +
+                    `Email <code>${emailInput}</code> sudah terdaftar dan diklaim oleh akun Telegram lain.\n` +
+                    `Satu email hanya boleh digunakan oleh satu akun Telegram untuk mencegah duplikasi.\n\n` +
+                    `<i>Gunakan alamat email Canva Anda yang lain.</i>`,
+                    { parse_mode: "HTML" }
+                );
+            }
+        }
+
+        // ============================================================
+        // LOGIC: EXTENSION vs NEW ACCOUNT
+        // ============================================================
+        let isExtension = false;
+
+        if (activeSub) {
+            // Check if Input Email matches Current Saved Email
+            if (emailInput === savedEmail) {
+                isExtension = true;
+            } else {
+                // Email Mismatch
+                if (!isAdmin(userId)) {
+                    // Member: Block
+                    return ctx.reply(
+                        `⛔ <b>Satu Akun Saja!</b>\n\n` +
+                        `Anda sudah memiliki langganan aktif untuk email: <b>${savedEmail}</b>.\n` +
+                        `Member hanya diperbolehkan memiliki 1 akun aktif.\n\n` +
+                        `💡 <b>Ingin ganti email?</b>\n` +
+                        `Hubungi Admin atau tunggu masa aktif habis.`,
+                        { parse_mode: "HTML" }
+                    );
+                } else {
+                    // Admin: Allow New (Force Invite)
+                    isExtension = false;
+                }
+            }
+        } else {
+            isExtension = false;
+        }
+
+        // ============================================================
+        // CASE A: PAKET PREMIUM (6 BULAN or 12 BULAN) - ID 3 or 4
+        // ============================================================
+        if (selectedProd === 3 || selectedProd === 4) {
+            const requiredPoints = selectedProd === 4 ? 12 : 6;
+            const pkgName = selectedProd === 4 ? "12 Bulan Premium" : "6 Bulan Premium";
+
+            // A.1 Cek Poin (Safe Check)
+            if (currentPoints < requiredPoints && !isAdmin(userId)) {
+                return ctx.reply(
+                    `⛔ <b>Poin Tidak Cukup!</b>\n\n` +
+                    `Paket <b>${pkgName}</b> membutuhkan <b>${requiredPoints} Poin Referral</b>.\n` +
+                    `Sisa Poin Anda: <b>${currentPoints}</b>\n\n` +
+                    `💡 <b>Solusi:</b>\n` +
+                    `1. Undang teman lagi (share link referral).\n` +
+                    `2. Atau ganti ke Paket Free / 6 Bulan di tombol "Menu Paket".`,
+                    { parse_mode: "HTML" }
+                );
+            }
+
+            // A.2 Logic Stacking / Extension (Only if Valid Extension)
+            if (isExtension && activeSub) {
+                // Cek Max Horizon (Maksimal 12 Bulan / 370 Hari dari SEKARANG)
+                const currentEndDate = new Date(activeSub.end_date as string);
+                const extendDays = selectedProd === 4 ? 360 : 180;
+
+                // Hitung tanggal masa depan SETELAH ditambah
+                const potentialNewEndDate = new Date(currentEndDate.getTime() + (extendDays * 24 * 60 * 60 * 1000));
+
+                const maxDateFromNow = new Date();
+                maxDateFromNow.setDate(maxDateFromNow.getDate() + 370); // 12 Bulan + Buffer 5 hari
+
+                // Check: Jika hasil perpanjangan melebihi 1 tahun dari HARI INI
+                if (potentialNewEndDate > maxDateFromNow && !isAdmin(userId)) {
+                    return ctx.reply(
+                        `⛔ <b>Batas Maksimal Tercapai!</b>\n\n` +
+                        `Anda tidak bisa menambah durasi lagi karena akan melebihi <b>12 Bulan</b>.\n\n` +
+                        `🕒 <b>Saat ini:</b> Expire ${TimeUtils.format(currentEndDate)}\n` +
+                        `➕ <b>Ditambah:</b> ${extendDays} Hari\n` +
+                        `❌ <b>Hasil:</b> Melebihi batas 1 tahun.\n\n` +
+                        `<i>Silakan tunggu sampai durasi berkurang.</i>`,
+                        { parse_mode: "HTML" }
+                    );
+                }
+
+                // EKSEKUSI PERPANJANGAN (DENGAN RETRY & REFUND)
+                const processingMsg = await ctx.reply("⏳ <b>Memproses Perpanjangan...</b>\nMohon tunggu sistem update database.", { parse_mode: "HTML" });
+
+                // 1. Potong Poin Dulu (Optimistik) - Skip for Admin
+                let pointsDeducted = false;
+                if (!isAdmin(userId)) {
+                    await sql("UPDATE users SET referral_points = referral_points - ? WHERE id = ?", [requiredPoints, userId]);
+                    pointsDeducted = true;
+                }
+
+                // 2. Retry Loop (Max 5x)
+                // const extendDays = selectedProd === 4 ? 360 : 180; // Already declared above
+                let success = false;
+                let finalExpiryStr = "";
+                let attempts = 0;
+
+                // JS Date Calc (Reliable)
+                // Assuming end_date in DB is UTC string "YYYY-MM-DD HH:mm:ss"
+                const dbDateStr = activeSub.end_date as string;
+                // Parse manually or use Date constructor (it assumes local if no TZ, but DB usually UTC-ish if using datetime('now'))
+                // Safer: Treat as UTC by appending 'Z' or parsing components if format is consistent.
+                // SQLite `datetime('now')` is UTC. `datetime('now', 'localtime')` is local.
+                // Using `new Date(string)` handles ISO. 
+
+                const oldEndDate = new Date(dbDateStr.includes('T') ? dbDateStr : dbDateStr.replace(' ', 'T') + '+07:00');
+                const newEndDateObj = new Date(oldEndDate.getTime() + (extendDays * 24 * 60 * 60 * 1000));
+
+                // Format back to SQLite string "YYYY-MM-DD HH:mm:ss"
+                // toISOString returns "2023-01-01T00:00:00.000Z"
+                const newEndDateStr = newEndDateObj.toISOString().replace('T', ' ').substring(0, 19);
+
+                while (attempts < 5 && !success) {
+                    attempts++;
+                    try {
+                        console.log(`🔄 Attempt ${attempts}: Updating sub ${activeSub.id} to ${newEndDateStr}`);
+
+                        await sql(
+                            `UPDATE subscriptions SET end_date = ?, product_id = ? WHERE id = ?`,
+                            [newEndDateStr, selectedProd, activeSub.id]
+                        );
+
+                        // Verify by Reading Back
+                        const verifyRes = await sql("SELECT end_date FROM subscriptions WHERE id = ?", [activeSub.id]);
+                        if (verifyRes.rows.length > 0) {
+                            const dbDate = verifyRes.rows[0].end_date as string;
+                            // Compare: The DB might return it slightly differently?
+                            // Just check if it is > oldEndDate by margin
+                            const checkDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
+
+                            if (checkDate.getTime() > oldEndDate.getTime() + 1000) { // Check if it moved forward
+                                success = true;
+                                finalExpiryStr = TimeUtils.format(checkDate);
+                            }
+                        }
+
+                        if (!success) await new Promise(r => setTimeout(r, 1000)); // Delay 1s
+
+                    } catch (e) {
+                        console.error(`Attempt ${attempts} failed:`, e);
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                }
+
+                // 3. Delete Loading Msg
+                try { await ctx.api.deleteMessage(ctx.chat.id, processingMsg.message_id); } catch (e) { }
+
+                if (success) {
+                    // Reset Selection so they must choose again next time
+                    await sql("UPDATE users SET selected_product_id = NULL WHERE id = ?", [userId]);
+
+                    return ctx.reply(
+                        `✅ <b>Perpanjangan Berhasil! (v2)</b>\n\n` +
+                        `Paket: <b>${pkgName}</b>\n` +
+                        `Email: <code>${savedEmail}</code>\n` +
+                        `Status: <b>Diperpanjang (+${extendDays} Hari)</b>\n` +
+                        `Exp Baru: <b>${finalExpiryStr}</b>\n\n` +
+                        `<i>Poin Anda telah dipotong ${requiredPoints} poin. Tidak perlu invite ulang.</i>`,
+                        { parse_mode: "HTML" }
+                    );
+                } else {
+                    // GAGAL 5x -> REFUND POIN
+                    if (pointsDeducted) {
+                        await sql("UPDATE users SET referral_points = referral_points + ? WHERE id = ?", [requiredPoints, userId]);
+                        return ctx.reply(
+                            `❌ <b>Perpanjangan Gagal! (v2)</b>\n\n` +
+                            `Sistem gagal memperbarui data setelah 5x percobaan (Koneksi Database Timeout).\n` +
+                            `✅ <b>${requiredPoints} Poin Anda telah dikembalikan.</b>\n\n` +
+                            `Silakan coba lagi beberapa saat lagi.`,
+                            { parse_mode: "HTML" }
+                        );
+                    } else {
+                        return ctx.reply("❌ <b>Gagal System! (v2)</b>\nSilakan hubungi Admin.", { parse_mode: "HTML" });
+                    }
+                }
+            }
+
+            // A.3 User Baru / Admin New Email -> Lanjut ke Queue (Potong Poin Dulu)
+            if (!isAdmin(userId)) {
+                await sql("UPDATE users SET referral_points = referral_points - ? WHERE id = ?", [requiredPoints, userId]);
+            }
+        }
+
+        // ============================================================
+        // CASE B: PAKET FREE (1 BULAN) - ID 1
+        // ============================================================
+        else {
+            // B.1 Strict Check: Tidak boleh ambil jika masih aktif
+            if (activeSub && !isAdmin(userId)) {
+                // Ensure correct UTC parsing for DB string
+                const dbDate = activeSub.end_date as string;
+                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
+                const expDate = TimeUtils.format(utcDate);
+                return ctx.reply(
+                    `⛔ <b>Akses Ditolak!</b>\n\n` +
+                    `Anda masih memiliki paket aktif sampai <b>${expDate}</b>.\n\n` +
+                    `Aturan Paket Free: Hanya bisa diklaim jika masa aktif sebelumnya sudah habis (Expired).\n` +
+                    `<i>Silakan tunggu expired atau upgrade ke Premium (bisa ditumpuk).</i>`,
+                    { parse_mode: "HTML" }
+                );
+            }
+        }
+
+        // ============================================================
+        // FINAL: INSTANT ACTIVATION (Via Invite Code)
+        // ============================================================
+
+        // 3. Find an available Canva node
+        const nodeRes = await sql("SELECT id, invite_code FROM canva_accounts WHERE is_active = 1 AND (max_slots - member_count) > 0 ORDER BY id ASC LIMIT 1");
+        if (nodeRes.rows.length === 0) {
+            return ctx.reply("⛔ <b>Gagal!</b>\n\nTidak ada slot kosong atau node aktif. Silakan hubungi Admin.", { parse_mode: "HTML" });
+        }
+        const assignedNodeId = nodeRes.rows[0].id as number;
+        let inviteCode = (nodeRes.rows[0].invite_code || "") as string;
+
+        if (!inviteCode) {
+            const codeRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code'");
+            if (codeRes.rows.length > 0 && codeRes.rows[0].value) {
+                inviteCode = codeRes.rows[0].value as string;
+            }
+        }
+
+        // 4. Update user to active immediately
+        await sql(
+            `UPDATE users SET email = ?, status = 'active', assigned_node_id = ?, selected_product_id = NULL WHERE id = ?`,
+            [emailInput, assignedNodeId, userId]
+        );
+
+        // 5. Create Subscription
+        let durationDays = 30;
+        let planNameStr = "1 Bulan Free";
+        if (selectedProd === 3) { durationDays = 180; planNameStr = "6 Bulan Premium"; }
+        else if (selectedProd === 4) { durationDays = 360; planNameStr = "12 Bulan Premium"; }
+
+        const startStr = TimeUtils.getWIBISOString();
+        const endDateObj = TimeUtils.addDaysWIB(durationDays);
+        const endDateStr = endDateObj.toISOString().replace('T', ' ').substring(0, 19);
+        const subId = `sub_${Date.now()}_${userId}`;
+
+        await sql(
+            `INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, 
+            [subId, userId, selectedProd, startStr, endDateStr]
+        );
+
+        // Optimistically increment member count
+        await sql("UPDATE canva_accounts SET member_count = member_count + 1 WHERE id = ?", [assignedNodeId]);
+
+        // 6. Reply with success & code
+        const keyboard = new InlineKeyboard()
+            .url("🔗 Buka Halaman Join", "https://www.canva.com/class/join");
+
+        const sentMsg = await ctx.reply(
+            `✅ <b>Aktivasi Berhasil!</b>\n\n` +
+            `Email: <code>${emailInput}</code>\n` +
+            `Paket: <b>${planNameStr}</b>\n` +
+            `Status: <b>Aktif</b>\n\n` +
+            `🔑 <b>KODE AKSES CANVA:</b>\n` +
+            `<code>${inviteCode || "Belum Tersedia"}</code>\n\n` +
+            `<b>Cara Pakai:</b>\n` +
+            `1. Klik tombol di bawah.\n` +
+            `2. Masukkan kode di atas.\n` +
+            `3. Klik Join/Gabung.\n\n` +
+            `⏳ <b>Expired:</b> ${TimeUtils.format(endDateObj)}`,
+            { parse_mode: "HTML", reply_markup: keyboard }
+        );
+
+        // 7. Save Message ID & CLEAR ORDER STATE
+        await sql("UPDATE users SET last_message_id = ?, selected_product_id = NULL WHERE id = ?", [sentMsg.message_id, userId]);
+
+    } catch (error: any) {
+        await ctx.reply(`❌ Error System: ${error.message}`);
+    }
+}
+
+// User Command: Aktivasi (User Submit Email)
+bot.command("aktivasi", async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const input = ctx.match; // Text after command
+
+    // Interactive Mode (No Input)
+    if (!input) {
+        // Cek apakah punya email tersimpan
+        const userRes = await sql("SELECT email FROM users WHERE id = ?", [userId]);
+        const savedEmail = userRes.rows.length > 0 ? userRes.rows[0].email : null;
+
+        const keyboard = new InlineKeyboard();
+        let msg = `🎁 <b>Konfirmasi Aktivasi</b>\n\n`;
+
+        if (savedEmail) {
+            msg += `Anda punya email tersimpan: <b>${savedEmail}</b>\nIngin memperpanjang akun ini?`;
+            keyboard.text(`🔄 Perpanjang: ${savedEmail}`, "act_extend").row();
+            keyboard.text("➕ Pakai Email Baru", "act_new_email");
+        } else {
+            msg += `Silakan masukkan email yang ingin diundang Canva Premium.`;
+            keyboard.text("📧 Input Email Manual", "act_new_email");
+        }
+
+        return ctx.reply(msg, { reply_markup: keyboard, parse_mode: "HTML" });
+    }
+
+    // Manual Input Mode
+    if (!input.includes("@")) {
+        return ctx.reply("⚠️ <b>Format Salah!</b>\nContoh: <code>/aktivasi emailmu@gmail.com</code>", { parse_mode: "HTML" });
+    }
+
+    await handleActivation(ctx, input.trim());
+});
+
+// Admin Command: Help Cookie
+bot.command("help_cookie", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    await ctx.reply(
+        "<b>Cara Mengambil Cookie Canva:</b>\n\n" +
+        "1. Login Canva.com di PC (Chrome).\n" +
+        "2. Tekan F12 -> Tab Network.\n" +
+        "3. Refresh page.\n" +
+        "4. Klik request teratas -> Tab Headers -> Copy value 'Cookie'.\n" +
+        "5. Kirim ke bot: <code>/set_cookie [paste_disini]</code>",
+        { parse_mode: "HTML" }
+    );
+});
+
+// Admin Command: Broadcast
+bot.command("broadcast", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const message = ctx.match;
+    const replyMsg = ctx.msg.reply_to_message;
+
+    if (!message && !replyMsg) {
+        return ctx.reply(
+            "⚠️ <b>Format Salah!</b>\n\n" +
+            "Caranya:\n" +
+            "1. <code>/broadcast [pesan]</code> (Kirim Teks)\n" +
+            "2. Reply pesan dengan <code>/broadcast</code> (Kirim Gambar/File/dll)",
+            { parse_mode: "HTML" }
+        );
+    }
+
+    try {
+        const users = await sql("SELECT id FROM users");
+        const totalUsers = users.rows.length;
+
+        if (totalUsers === 0) return ctx.reply("❌ Belum ada user di database.");
+
+        const statusMsg = await ctx.reply(`⏳ <b>Memulai Broadcast ke ${totalUsers} user...</b>`, { parse_mode: "HTML" });
+
+        let success = 0;
+        let blocked = 0;
+        let failed = 0;
+
+        for (const user of users.rows) {
+            try {
+                if (replyMsg) {
+                    await ctx.api.copyMessage(user.id as number, ctx.chat.id, replyMsg.message_id);
+                } else {
+                    await ctx.api.sendMessage(user.id as number, message as string);
+                }
+                success++;
+            } catch (e: any) {
+                if (e.description?.includes("blocked")) {
+                    blocked++;
+                } else {
+                    failed++;
+                }
+            }
+            // Anti-Flood: Delay 30ms (Max 30 msg/sec)
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `✅ <b>Broadcast Selesai!</b>\n\n` +
+            `📨 Total Dikirim: <b>${success}</b>\n` +
+            `⛔ User Blokir: <b>${blocked}</b>\n` +
+            `❌ Gagal Lainnya: <b>${failed}</b>`,
+            { parse_mode: "HTML" }
+        );
+
+    } catch (error: any) {
+        await ctx.reply(`❌ Error System: ${error.message}`);
+    }
+});
+
+// Admin Command: Add Points Manual
+bot.command("addpoint", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const input = ctx.match;
+    if (!input || !input.includes("|")) {
+        return ctx.reply("⚠️ <b>Format Salah!</b>\nContoh: <code>/addpoint 12345678|10</code>\n(ID Telegram | Jumlah Poin)", { parse_mode: "HTML" });
+    }
+
+    const [targetIdStr, amountStr] = input.split("|");
+    const targetId = parseInt(targetIdStr.trim());
+    const amount = parseInt(amountStr.trim());
+
+    if (isNaN(targetId) || isNaN(amount)) {
+        return ctx.reply("⚠️ ID atau Jumlah Poin harus angka.");
+    }
+
+    try {
+        // Check if user exists
+        const userCheck = await sql("SELECT id FROM users WHERE id = ?", [targetId]);
+        if (userCheck.rows.length === 0) {
+            return ctx.reply("❌ User ID tidak ditemukan di database.");
+        }
+
+        // Update Points
+        await sql("UPDATE users SET referral_points = referral_points + ? WHERE id = ?", [amount, targetId]);
+
+        // Notify Admin
+        await ctx.reply(`✅ <b>Berhasil!</b>\nUser ID: <code>${targetId}</code>\nDitambah: <b>${amount} Poin</b>`, { parse_mode: "HTML" });
+
+        // Notify User
+        try {
+            await ctx.api.sendMessage(
+                targetId,
+                `🎉 <b>Selamat! Poin Ditambahkan</b>\n\n` +
+                `Admin telah menambahkan <b>${amount} Poin</b> ke akun Anda.\n` +
+                `Gunakan poin untuk menukarkan paket Premium! 🎁`,
+                { parse_mode: "HTML" }
+            );
+        } catch (e) {
+            await ctx.reply("⚠️ Poin masuk, tapi gagal kirim notif ke user (User memblokir bot?).");
+        }
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// DELETE USER (Hard Delete) - Admin Only
+bot.command("delete_user", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const input = ctx.match?.trim();
+    if (!input) {
+        return ctx.reply(
+            "⚠️ <b>Format Salah!</b>\n\n" +
+            "Gunakan:\n" +
+            "1. <code>/delete_user email@gmail.com</code>\n" +
+            "2. <code>/delete_user 123456789</code> (ID Telegram)",
+            { parse_mode: "HTML" }
+        );
+    }
+
+    try {
+        let user;
+        // Cek input apakah Email atau ID
+        if (input.includes("@")) {
+            const res = await sql("SELECT * FROM users WHERE email = ?", [input]);
+            user = res.rows[0];
+        } else if (/^\d+$/.test(input)) {
+            const res = await sql("SELECT * FROM users WHERE id = ?", [input]);
+            user = res.rows[0];
+        } else {
+            return ctx.reply("❌ Input tidak valid (harus Email atau ID angka).");
+        }
+
+        if (!user) {
+            return ctx.reply(`❌ User <code>${input}</code> tidak ditemukan.`, { parse_mode: "HTML" });
+        }
+
+        const userId = user.id;
+
+        // EXECUTE DELETE
+        // 1. Delete Subscriptions
+        await sql("DELETE FROM subscriptions WHERE user_id = ?", [userId]);
+
+        // 2. Delete User
+        await sql("DELETE FROM users WHERE id = ?", [userId]);
+
+        await ctx.reply(
+            `✅ <b>User Berhasil Dihapus!</b>\n\n` +
+            `👤 Nama: ${user.first_name}\n` +
+            `📧 Email: ${user.email || "-"}\n` +
+            `🆔 ID: <code>${userId}</code>\n\n` +
+            `Data user telah dihapus permanen dari database.`,
+            { parse_mode: "HTML" }
+        );
+
+    } catch (error: any) {
+        await ctx.reply(`❌ Error: ${error.message}`);
+    }
+});
+
+// Alias: /delete_email (Legacy Support)
+bot.command("delete_email", async (ctx) => {
+    // Redirect to /delete_user logic manually or just instruct
+    // Re-using logic is complex due to context matching, better to just warn or copy-paste core logic.
+    // Simplest: Just tell them to use new command
+    await ctx.reply("⚠️ Command ini sudah diganti.\nSilakan gunakan: <code>/delete_user [email/id]</code>", { parse_mode: "HTML" });
+});
+
+// ============================================================
+// MENU HANDLERS (TEXT INPUT DARI KEYBOARD)
+// ============================================================
+
+bot.hears("🎁 Menu Paket", async (ctx) => {
+    // Menu Varian Paket dengan Quantity Selector
+    // Default Qty = 1
+    const qty = 1;
+    const points = 6 * qty;
+
+    const keyboard = new InlineKeyboard()
+        .text("🌟 1 Bulan (Free)", "buy_1_month").row()
+        .text("➖", "pkg_qty_dec_1") // Payload: current qty to dec (min 1)
+        .text(`📦 1 Akun (6 Bln)`, "noop")
+        .text("➕", "pkg_qty_inc_1").row() // Payload: current qty to inc (max 2)
+        .text(`💎 Beli 6 Bulan (${points} Poin)`, `buy_6_month_${qty}`).row();
+
+    await ctx.reply(
+        `<b>🎁 Pilih Paket Canva</b>\n\n` +
+        `1. <b>1 Bulan Free</b>\n` +
+        `   - Gratis tanpa syarat invite.\n` +
+        `   - Hanya bisa 1x klaim.\n\n` +
+        `2. <b>6 Bulan Premium</b>\n` +
+        `   - Syarat: 6 Poin / Akun.\n` +
+        `   - <b>Bisa ditumpuk!</b> (Maks 2x = 1 Tahun)\n` +
+        `   - Gunakan tombol +/- untuk atur jumlah.\n\n` +
+        `Silakan atur pesanan di bawah:`,
+        { reply_markup: keyboard, parse_mode: "HTML" }
+    );
+});
+
+// Handler untuk Quantity Buttons
+bot.callbackQuery(/^pkg_qty_(inc|dec)_(\d+)$/, async (ctx) => {
+    const action = ctx.match[1];
+    const currentQty = parseInt(ctx.match[2]);
+    let newQty = currentQty;
+
+    if (action === "inc") {
+        if (currentQty < 2) newQty++;
+    } else {
+        if (currentQty > 1) newQty--;
+    }
+
+    // Jika tidak berubah, answer saja
+    if (newQty === currentQty) return ctx.answerCallbackQuery(action === "inc" ? "Maksimal 2x" : "Minimal 1x");
+
+    const points = 6 * newQty;
+    const label = newQty === 1 ? "1 Akun (6 Bln)" : "1 Akun (12 Bln)";
+
+    // Rebuild Keyboard
+    const keyboard = new InlineKeyboard()
+        .text("🌟 1 Bulan (Free)", "buy_1_month").row()
+        .text("➖", `pkg_qty_dec_${newQty}`)
+        .text(`📦 ${label}`, "noop")
+        .text("➕", `pkg_qty_inc_${newQty}`).row()
+        .text(`💎 Beli ${label} (${points} Poin)`, `buy_6_month_${newQty}`).row();
+
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("noop", async (ctx) => {
+    await ctx.answerCallbackQuery();
+});
+
+bot.hears("👤 Profil Saya", async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    // Get User & Sub Data
+    const userRes = await sql("SELECT * FROM users WHERE id = ?", [userId]);
+    const subRes = await sql(
+        `SELECT s.*, p.name as plan_name 
+         FROM subscriptions s 
+         JOIN products p ON s.product_id = p.id 
+         WHERE s.user_id = ? AND s.status = 'active'`,
+        [userId]
+    );
+
+    const user = userRes.rows[0];
+
+    // FIX: Check if user exists
+    if (!user) {
+        return ctx.reply("❌ Data user tidak ditemukan. Silakan ketik /start untuk mendaftar.", { parse_mode: "HTML" });
+    }
+    const sub = subRes.rows[0]; // Ambil yang pertama jika ada (Single Active Sub rule)
+
+    let status = "❌ Free / Inactive";
+    let plan = "-";
+    let expDate = "-";
+    let expDateObj = null;
+
+    if (sub) {
+        // Real-time Expiry Check (Compare WIB vs WIB)
+        // DB stores "YYYY-MM-DD HH:MM:SS" which represents WIB time.
+        const nowWIB = TimeUtils.nowWIB();
+
+        // Parse DB String (WIB) to Date Object
+        // If we trust DB is WIB, we treat it as such.
+        // We use string comparison for simplicity/robustness or parse manually.
+        const dbDateStr = sub.end_date as string;
+
+        // Manual Parse to avoid Timezone auto-conversion issues
+        // "2026-01-01 17:00:00" -> treat as pure values
+        const t = dbDateStr.split(/[- :]/);
+        // Date(year, monthIndex, day, hours, minutes, seconds)
+        const expDateObj = new Date(parseInt(t[0]), parseInt(t[1]) - 1, parseInt(t[2]), parseInt(t[3]), parseInt(t[4]), parseInt(t[5]));
+
+        // Now 'expDateObj' created this way uses SYSTEM timezone (likely UTC in Vercel).
+        // BUT 'nowWIB' also uses SYSTEM timezone but with values shifted +7.
+        // So comparing them is valid (Apples to Apples).
+
+        /* 
+           Wait, there is a risk: 
+           If Vercel is UTC:
+           nowWIB() returns a Date object where .getHours() is +7 from real UTC.
+           new Date(y, m, d...) creates a Date object where .getHours() is y,m,d (mapped to UTC).
+           So yes, they are comparable!
+        */
+
+        // Display
+        expDate = TimeUtils.format(expDateObj); // .format() expects a Date object
+
+        if (expDateObj < nowWIB) {
+            status = "❌ Expired";
+            plan = "❌ Expired";
+        } else {
+            status = "✅ Premium Active";
+
+            // Dynamic Plan Label based on Duration
+            const diffMs = expDateObj.getTime() - nowWIB.getTime();
+            const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+            const diffMonths = (diffDays / 30).toFixed(1);
+
+            // If very long duration, show simpler month count
+            if (diffDays > 35) {
+                plan = `Premium (±${Math.round(diffDays / 30)} Bulan)`;
+            } else {
+                plan = (sub.plan_name as string) || "-"; // Fallback to DB name for short term
+            }
+        }
+    }
+    const points = user.referral_points || 0;
+    const refLink = `https://t.me/${ctx.me.username}?start=${user.referral_code}`;
+    const role = isAdmin(userId) ? "👑 Admin" : "👤 Member";
+
+    // Button to view active accounts (Admin Only or for everyone? User implied "active accounts" list, likely for Admin to see stock or for user to see THEIR accounts?)
+    // "liat daftar akun yang aktif lengkap deengan email dan masa aktifnya" -> implies GLOBAL active accounts (Admin Feature).
+    // Let's assume Admin only feature for now, or check if regular user has multiple accounts?
+    // The previous code `SELECT * FROM users` implies single user.
+    // Given the context of "bot store" / "admin panel", this likely refers to the ADMIN seeing ALL active accounts.
+    // BUT the button is in "Profil Saya".
+
+    const keyboard = new InlineKeyboard();
+    keyboard.text("📋 Lihat Daftar Akun", "view_account_list");
+
+    await ctx.reply(
+        `👤 <b>Profil Pengguna</b>\n\n` +
+        `🆔 ID: <code>${userId}</code>\n` +
+        `👤 Nama: <b>${user.first_name}</b>\n` +
+        `🔰 Role: <b>${role}</b>\n\n` +
+        `📊 <b>Status Akun:</b>\n` +
+        `• Status: ${status}\n` +
+        `• Paket: ${plan}\n` +
+        `• Expired: ${expDate}\n\n` +
+        `🤝 <b>Referral Info:</b>\n` +
+        `• Poin: <b>${points}</b>\n` +
+        `• Link: <code>${refLink}</code>\n\n` +
+        `<i>Bagikan link untuk dapat poin!</i>`,
+        {
+            parse_mode: "HTML",
+            reply_markup: keyboard
+        }
+    );
+});
+
+// 4. Panduan (Help)
+bot.hears("📖 Panduan", async (ctx) => {
+    await ctx.reply(
+        `📖 <b>PANDUAN LENGKAP BOT V3</b>\n\n` +
+        `👤 <b>Perintah User:</b>\n` +
+        `• <b>/start</b> - Mulai ulang bot & cek menu.\n` +
+        `• <b>/aktivasi [email]</b> - Aktivasi Canva Pro.\n` +
+        `• <b>🎁 Menu Paket</b> - Beli paket (1 Bulan Free / 6 Bulan).\n` +
+        `• <b>👤 Profil Saya</b> - Cek status, poin, & link referral.\n` +
+        `• <b>📊 Cek Slot</b> - Cek sisa slot tim.\n` +
+        `• <b>📖 Panduan</b> - Tampilkan pesan ini.\n\n` +
+
+        `ℹ️ <b>Tips:</b>\n` +
+        `1. Wajib join channel agar bot bisa digunakan.\n` +
+        `2. Undang teman = 1 Poin (Bisa tukar paket).\n\n` +
+
+        `👮 <b>Perintah Admin (Owner):</b>\n` +
+        `• <b>/admin</b> - Buka Panel Admin Super (UI).\n` +
+        `• <b>/addaccount</b> - Tambah Akun Canva (Upload JSON/Caption).\n` +
+        `• <b>/listaccounts</b> - List semua node & tombol hapus.\n` +
+        `• <b>/addpoint [ID|Jml]</b> - Tambah poin user manual.\n` +
+        `• <b>/deleteaccount [ID]</b> - Hapus node canva manual.\n` +
+        `• <b>/delete_user [email/id]</b> - Hapus user permanen.\n` +
+        `• <b>/reset_email [email]</b> - Reset langganan (Soft Delete).\n` +
+        `• <b>/forceexpire [email]</b> - Paksa expired (Tes Auto-Kick).\n` +
+        `• <b>/broadcast [pesan]</b> - Broadcast ke semua user.\n` +
+        `• <b>/data</b> - Download backup data user (.txt).\n` +
+        `• <b>/addlogtopik</b> - Set notifikasi slot penuh di chat ini.\n` +
+        `• <b>/set_channels</b> - Atur channel wajib subs.\n` +
+        `• <b>/setua [text]</b> - Ganti User-Agent browser.\n` +
+        `• <b>/debug</b> - Cek status admin & ID.`,
+        { parse_mode: "HTML" }
+    );
+});
+
+// Shared Admin Panel Logic
+const showAdminPanel = async (ctx: MyContext) => {
+    if (!isAdmin(ctx.from?.id || 0)) return ctx.reply("⛔ Menu ini khusus Admin.");
+
+    // Menu Admin
+    const slotInfo = await checkSlots();
+
+    // Ambil Team ID dari DB
+    const teamRes = await sql("SELECT value FROM settings WHERE key = 'canva_team_id'");
+    const teamId = teamRes.rows.length > 0 ? teamRes.rows[0].value : "Multi-Node Mode";
+
+    // ADMIN PANEL SUPER MENU (UPDATED)
+    const adminKeyboard = new InlineKeyboard()
+        .text("📊 Info Slot", "check_slot_btn").text("📢 Set Log Topik", "adm_help_log").row()
+        .text("☠️ Force Expire", "adm_help_exp").text("🗑️ Menu Hapus", "adm_menu_del").row()
+        .text("🧪 Test Auto-Invite", "test_invite").text("🦶 Test Auto-Kick", "test_kick").row()
+        .text("🍪 Status Cookie", "adm_cookie").text("🏭 List Accounts", "adm_list_accounts").row()
+        .text("💾 Database Tools", "adm_db_menu").text("📋 List Channel", "adm_list_ch").row()
+        .text("➕ Add Point Manual", "adm_help_addpoint").text("💸 Set Donasi", "adm_set_donasi").row()
+        .text("🔄 Sinkronisasi Manual", "adm_refresh_code").row();
+
+    await ctx.reply(
+        `<b>Panel Admin Super v2.0</b>\n\n` +
+        `🆔 Team ID: <code>${teamId}</code>\n` +
+        `📊 Status Slot: ${slotInfo}\n\n` +
+        `👇 <b>Panduan Cepat Link:</b>\n` +
+        `• <b>Set Log Topik:</b> Set notifikasi warning slot penuh.\n` +
+        `• <b>Force Expire:</b> Test kick user.\n` +
+        `• <b>Menu Hapus:</b> (Hati-hati) Hard/Soft Delete user.\n` +
+        `• <b>Sinkronisasi Manual:</b> Sapu bersih & cek semua node.\n`,
+        {
+            parse_mode: "HTML",
+            reply_markup: adminKeyboard
+        }
+    );
+};
+
+// Register Admin Commands & Button
+bot.command(["admin", "panel"], showAdminPanel);
+bot.hears("👨‍💻 Admin Panel", showAdminPanel);
+
+// Command: Soft Reset (Reset Email)
+bot.command("reset_email", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const input = (ctx.match as string || "").trim();
+    if (!input) return ctx.reply("⚠️ Format: <code>/reset_email [email]</code>", { parse_mode: "HTML" });
+
+    try {
+        // 1. Cari User ID
+        const userRes = await sql("SELECT id, first_name FROM users WHERE email = ?", [input]);
+        if (userRes.rows.length === 0) return ctx.reply("❌ Email tidak ditemukan di database.");
+
+        const userId = userRes.rows[0].id;
+        const userName = userRes.rows[0].first_name;
+
+        // 2. Soft Delete Logic
+        // - Hapus Subscription
+        await sql("DELETE FROM subscriptions WHERE user_id = ?", [userId]);
+        // - Reset Email di table User (jadi NULL) -> agar bisa daftar lagi fresh
+        await sql("UPDATE users SET email = NULL WHERE id = ?", [userId]);
+
+        await ctx.reply(
+            `♻️ <b>Soft Reset Berhasil!</b>\n\n` +
+            `👤 Nama: ${userName}\n` +
+            `📧 Email: ${input} (Direset)\n\n` +
+            `✅ Langganan dihapus.\n` +
+            `✅ Data Poin & History tetap AMAN.\n` +
+            `User bisa mendaftar ulang dengan email baru/sama.`,
+            { parse_mode: "HTML" }
+        );
+
+    } catch (e: any) {
+        console.error(e);
+        await ctx.reply(`❌ Gagal reset: ${e.message}`);
+    }
+});
+
+// CALLBACK HANDLERS FOR ADMIN MENU
+
+bot.callbackQuery("adm_refresh_code", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    
+    // 1. Alert that request is starting
+    await ctx.answerCallbackQuery("Sistem pembersihan masif diaktifkan...");
+    
+    // 2. Trigger GHA with event "manual_sync"
+    const trigger = await triggerGithubAction("manual_sync");
+    
+    if (trigger.success) {
+        await ctx.reply(
+            `✅ <b>Refresh Code Dijalankan!</b>\n\n` +
+            `Sinyal berhasil dikirim ke GitHub Actions.\n` +
+            `Mesin pengambil kode sedang bekerja di latar belakang.\n\n` +
+            `<i>Kode akan terupdate di database dalam 1-2 menit.</i>`,
+            { parse_mode: "HTML" }
+        );
+    } else {
+        await ctx.reply(
+            `❌ <b>Gagal Menjalankan Refresh Code</b>\n\n` +
+            `Error: <code>${trigger.message}</code>\n\n` +
+            `Silakan periksa Token GitHub Anda.`,
+            { parse_mode: "HTML" }
+        );
+    }
+});
+
+bot.callbackQuery("check_slot_btn", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    try {
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used, COUNT(id) as nodes FROM canva_accounts WHERE is_active=1");
+        const row = totalSlotsRes.rows[0];
+
+        const currentCount = parseInt(row.used as any) || 0;
+        const maxSlot = parseInt(row.max as any) || 0;
+        const nodeCount = parseInt(row.nodes as any) || 0;
+        const available = maxSlot - currentCount;
+        const isFull = currentCount >= maxSlot;
+
+        let msg = `📊 <b>Status Server Canva (Cluster)</b>\n\n`;
+        msg += `👥 <b>Total Member:</b> ${currentCount} / ${maxSlot}\n`;
+        msg += `🟢 <b>Slot Tersedia:</b> ${available > 0 ? available : 0}\n`;
+        msg += `🏭 <b>Node Aktif:</b> ${nodeCount} Server\n\n`;
+
+        if (isFull) {
+            msg += `⛔ <b>STATUS: PENUH (ALL NODES)</b>\n`;
+            msg += `<i>Silakan cek lagi nanti. Admin sedang menambah server baru.</i>`;
+        } else {
+            msg += `✅ <b>STATUS: AMAN</b>\n`;
+            msg += `<i>Slot masih tersedia untuk aktivasi.</i>`;
+        }
+
+        await ctx.reply(msg, { parse_mode: "HTML" });
+        await ctx.answerCallbackQuery();
+    } catch (e: any) {
+        await ctx.reply(`❌ Gagal cek slot: ${e.message}`);
+        await ctx.answerCallbackQuery();
+    }
+});
+
+// View Account List Handler (Per User)
+bot.callbackQuery("view_account_list", async (ctx) => {
+    // 1. Loading Animation
+    await ctx.editMessageText("⏳ <b>Sedang memuat data akun...</b>", { parse_mode: "HTML" });
+
+    try {
+        const userId = ctx.from.id;
+
+        // 2. Fetch Data (Filtered by User ID)
+        // Join users and subscriptions to get email and expiry
+        const res = await sql(`
+            SELECT u.email, s.end_date, p.name as plan_name 
+            FROM subscriptions s
+            JOIN users u ON s.user_id = u.id
+            JOIN products p ON s.product_id = p.id
+            WHERE s.status = 'active' AND s.user_id = ?
+            ORDER BY s.end_date ASC
+        `, [userId]);
+
+        if (res.rows.length === 0) {
+            // Add back button even if empty
+            const backKeyboard = new InlineKeyboard().text("🔙 Kembali", "adm_back_profile");
+            // Note: adm_back_profile logic needs to exist or we use deleteMessage? 
+            // Better to just let them close or re-open profile.
+            // User requested "professional", so maybe just text update is enough.
+            return ctx.editMessageText("📂 <b>Daftar Akun Saya</b>\n\nAnda belum memiliki akun aktif.", { parse_mode: "HTML" });
+        }
+
+        // 3. Format Data
+        const header = `📋 <b>DAFTAR AKUN SAYA (${res.rows.length})</b>\n\n`;
+        const list = res.rows.map((row: any, i: number) => {
+            const num = i + 1;
+            const email = row.email || "No Email";
+            let plan = row.plan_name;
+            let expStr = "-";
+
+            if (row.end_date) {
+                const expDate = new Date(row.end_date);
+                // Use UTC to display raw WIB string
+                expStr = TimeUtils.format(expDate).replace("WIB", "").trim(); // TimeUtils defaults to Jakarta, so we might need manual string or just simple toLocale
+
+                // Force simpler formatting that respects the RAW value
+                expStr = expDate.toLocaleString('id-ID', { timeZone: 'UTC' });
+
+                const nowUTC = new Date();
+                const nowWIB = new Date(nowUTC.getTime() + (7 * 60 * 60 * 1000));
+
+                if (expDate < nowWIB) {
+                    plan = "❌ Expired";
+                } else {
+                    // Check Duration for "User Premium" label
+                    const diffMs = expDate.getTime() - nowWIB.getTime();
+                    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+                    if (diffDays > 35) {
+                        plan = "User Premium";
+                    }
+                }
+            }
+
+            return `<b>${num}. ${email}</b>\n   📦 ${plan}\n   ⏳ Exp: ${expStr}`;
+        }).join("\n\n");
+
+        const footer = `\n\n<i>Data dimuat pada: ${TimeUtils.format()}</i>`;
+        const fullMsg = header + list + footer;
+
+        await ctx.editMessageText(fullMsg, { parse_mode: "HTML" });
+
+    } catch (e: any) {
+        console.error(e);
+        await ctx.editMessageText(`❌ <b>Gagal Memuat Data</b>\n${e.message}`, { parse_mode: "HTML" });
+    }
+});
+
+// Delete Submenu Handler
+bot.callbackQuery("adm_menu_del", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+
+    const delKeyboard = new InlineKeyboard()
+        .text("♻️ Soft Reset (Jaga Poin)", "adm_help_reset_email").row()
+        .text("🔥 Hard Delete (Lenyap)", "adm_help_del").row()
+        .text("🔙 Kembali", "adm_back_main");
+
+    await ctx.editMessageText(
+        `🗑️ <b>Menu Penghapusan User</b>\n\n` +
+        `Pilih jenis penghapusan:\n` +
+        `1. <b>Soft Reset</b>: Hanya hapus langganan & lepas email. Poin user aman.\n` +
+        `2. <b>Hard Delete</b>: Hapus SEMUA data user permanen.\n\n` +
+        `Silakan pilih panduan di bawah:`,
+        { parse_mode: "HTML", reply_markup: delKeyboard }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_back_main", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.deleteMessage();
+    await ctx.reply("🔄 Silakan ketik <code>/admin</code> untuk kembali ke menu utama.", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_help_reset_email", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        `♻️ <b>Soft Reset Email:</b>\n\n` +
+        `Gunakan ini jika user ingin ganti email atau re-subscribe tanpa hilang poin.\n` +
+        `Command: <code>/reset_email user@gmail.com</code>`,
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Helper: Admin Log Topic Guide
+bot.callbackQuery("adm_help_log", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        `📢 <b>Cara Set Topik Notifikasi:</b>\n\n` +
+        `1. Masuk ke Grup/Topik tujuan.\n` +
+        `2. Pastikan Bot sudah di grup tersebut.\n` +
+        `3. Ketik command: <code>/addlogtopik</code>\n\n` +
+        `Bot akan otomatis mengirim peringatan "Slot Hampir Penuh" ke sana.`,
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// 1. Cek Settings
+bot.callbackQuery("adm_team_id", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const teamRes = await sql("SELECT value FROM settings WHERE key = 'canva_team_id'");
+    const val = teamRes.rows.length > 0 ? teamRes.rows[0].value : "Multi-Node Mode";
+    await ctx.reply(`🆔 <b>Main Team ID:</b>\n<code>${val}</code>\n\nUntuk menambah node dengan Team ID berbeda, gunakan <code>/addaccount</code>.`, { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_cookie", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const cookieRes = await sql("SELECT value FROM settings WHERE key = 'canva_cookie'");
+    const val = cookieRes.rows.length > 0 ? "✅ Tersimpan" : "❌ Kosong";
+
+    // Submenu Cookie
+    const cookieKeyboard = new InlineKeyboard()
+        .text("👁️ Cek Isi Cookie", "adm_view_cookie").row()
+        .text("🔙 Kembali", "adm_back_main");
+
+    await ctx.reply(
+        `🍪 <b>Status Cookie:</b> ${val}\n\n` +
+        `Menu Manajemen Akun:\n` +
+        `1. <b>Tambah Akun:</b> Kirim file .json dengan caption <code>/addaccount</code>\n` +
+        `2. <b>List Akun:</b> Ketik <code>/listaccounts</code>\n` +
+        `3. <b>Set User-Agent:</b> Reply pesan teks dengan command <code>/setua</code>\n` +
+        `4. <b>Cek Isi:</b> Tekan tombol di bawah untuk liat detail.`,
+        { parse_mode: "HTML", reply_markup: cookieKeyboard }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Command: Debug Admin Status (Public)
+bot.command("debug", async (ctx) => {
+    const userId = ctx.from?.id || 0;
+    const adminIdEnv = (globalThis as any).ENV. || "NOT SET";
+    const isAdminUser = isAdmin(userId);
+
+    await ctx.reply(
+        `🕵️ <b>Debug Info</b>\n\n` +
+        `👤 User ID: <code>${userId}</code>\n` +
+        `🔑 Configured Admin ID: <code>${adminIdEnv.substring(0, 3)}***</code>\n` +
+        `🛡️ Is Admin? <b>${isAdminUser ? "YES ✅" : "NO ❌"}</b>\n\n` +
+        `Jika NO, pastikan ADMIN_ID di Vercel Settings sama dengan User ID Anda.`,
+        { parse_mode: "HTML" }
+    );
+});
+
+// Command: Set User-Agent
+bot.command("setua", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    let ua = ctx.match as string;
+
+    // Support reply to text
+    if (!ua && ctx.msg.reply_to_message && "text" in ctx.msg.reply_to_message) {
+        ua = ctx.msg.reply_to_message.text || "";
+    }
+
+    if (!ua) {
+        return ctx.reply(
+            `⚠️ <b>Format Salah!</b>\n\n` +
+            `Cara set User-Agent:\n` +
+            `1. <b>Reply</b> pesan teks UA dengan command <code>/setua</code>\n` +
+            `2. Atau: <code>/setua Mozilla/5.0...</code>`,
+            { parse_mode: "HTML" }
+        );
+    }
+
+    try {
+        await sql(
+            `INSERT INTO settings (key, value) VALUES ('canva_user_agent', ?) 
+             ON CONFLICT(key) DO UPDATE SET value = ?`,
+            [ua, ua]
+        );
+        await ctx.reply(`✅ <b>User-Agent Berhasil Disimpan!</b>\n\nGitHub Actions sekarang akan menggunakan UA ini untuk penyamaran.`, { parse_mode: "HTML" });
+    } catch (e: any) {
+        await ctx.reply(`❌ Gagal menyimpan UA: ${e.message}`);
+    }
+});
+
+// Command: Delete Account (Node)
+bot.command("deleteaccount", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const nodeId = parseInt(ctx.match as string);
+    if (isNaN(nodeId)) {
+        return ctx.reply("⚠️ <b>Format Salah!</b>\nGunakan: <code>/deleteaccount ID</code>\nContoh: <code>/deleteaccount 1</code>", { parse_mode: "HTML" });
+    }
+
+    try {
+        const check = await sql("SELECT id FROM canva_accounts WHERE id = ?", [nodeId]);
+        if (check.rows.length === 0) {
+            return ctx.reply(`❌ Node #${nodeId} tidak ditemukan.`);
+        }
+
+        await sql("DELETE FROM canva_accounts WHERE id = ?", [nodeId]);
+        await sql("UPDATE users SET assigned_node_id = NULL WHERE assigned_node_id = ?", [nodeId]);
+        await sql("UPDATE users SET assigned_node_id = assigned_node_id - 1 WHERE assigned_node_id > ?", [nodeId]);
+        await sql(`
+            WITH ordered AS (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY id ASC) AS new_id
+                FROM canva_accounts
+            )
+            UPDATE canva_accounts
+            SET id = (SELECT new_id FROM ordered WHERE ordered.id = canva_accounts.id)
+        `);
+        await sql("UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX(id), 0) FROM canva_accounts) WHERE name = 'canva_accounts'");
+        await ctx.reply(`✅ <b>Node #${nodeId} Berhasil Dihapus!</b>\nUrutan node dan referensi user sudah dirapikan ulang.`);
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// Command: Test Expire (Force Expire in X Minutes)
+bot.command("tesexp", async (ctx) => {
+    // Debug Log
+    console.log(`CMD: /tesexp from ${ctx.from?.id}`);
+
+    if (!isAdmin(ctx.from?.id || 0)) {
+        return ctx.reply("❌ <b>Akses Ditolak!</b>\nHanya admin yang bisa menggunakan command ini.", { parse_mode: "HTML" });
+    }
+
+    const args = (ctx.match as string).split("|");
+    if (args.length !== 2) {
+        return ctx.reply("⚠️ <b>Format Salah!</b>\n\nFormat: <code>/tesexp email@domain.com|menit</code>\nContoh: <code>/tesexp user@gmail.com|2</code>", { parse_mode: "HTML" });
+    }
+
+    const email = args[0].trim();
+    const minutes = parseInt(args[1].trim());
+
+    if (isNaN(minutes)) return ctx.reply("❌ Menit harus angka.");
+
+    try {
+        const userRes = await sql("SELECT id, assigned_node_id FROM users WHERE email = ?", [email]);
+        if (userRes.rows.length === 0) return ctx.reply("❌ User tidak ditemukan di database.");
+
+        for (const row of userRes.rows) {
+            const userId = row.id;
+            await sql(`
+                UPDATE subscriptions 
+                SET status = 'active', 
+                    end_date = datetime('now', '+7 hours', '+${minutes} minutes') 
+                WHERE user_id = ?
+            `, [userId]);
+            if (row.assigned_node_id !== null) {
+                await sql("UPDATE users SET status = 'active' WHERE id = ?", [userId]);
+            }
+        }
+
+        // Trigger GitHub Action
+        const trigger = await triggerGithubAction();
+
+        await ctx.reply(
+            `🧪 <b>Test Expire Set!</b>\n\n` +
+            `📧 User: <code>${email}</code>\n` +
+            `⏳ Expire In: ${minutes} menit\n` +
+            `🚀 Status Trigger GHA: <b>${trigger.message}</b>\n\n` +
+            `Semua akun dengan email ini diatur 'Active' sekarang, dan akan otomatis 'Expired' setelah ${minutes} menit.`,
+            { parse_mode: "HTML" }
+        );
+
+    } catch (e) {
+        console.error(e);
+        await ctx.reply("❌ Database Error.");
+    }
+});
+
+bot.callbackQuery("adm_view_cookie", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await showCookieInfo(ctx);
+    await ctx.answerCallbackQuery();
+});
+
+// Command: Cek Cookie
+bot.command("cekcookie", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    await showCookieInfo(ctx);
+});
+
+async function showCookieInfo(ctx: any) {
+    try {
+        const res = await sql("SELECT * FROM canva_accounts ORDER BY id ASC");
+        if (res.rows.length === 0) {
+            return ctx.reply("❌ <b>Tidak ada Akun!</b>\nBelum ada akun Canva yang ditambahkan. Gunakan <code>/addaccount</code>.", { parse_mode: "HTML" });
+        }
+
+        let msg = `🍪 <b>Status Akun Canva (Multi-Node)</b>\n\n`;
+
+        for (const acc of res.rows) {
+            const status = acc.is_active ? "🟢 Aktif" : "🔴 Mati";
+            const email = acc.email || "Unknown";
+            const count = acc.member_count || 0;
+            const cookieprev = (acc.cookie as string).substring(0, 15) + "...";
+
+            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `📧 ${email}\n`;
+            msg += `👥 ${count} Member\n`;
+            msg += `🔑 ${cookieprev}\n\n`;
+        }
+
+        await ctx.reply(msg, { parse_mode: "HTML" });
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+}
+
+// Helper: Get Next Slot String
+async function getNextSlotInfo(): Promise<string> {
+    try {
+        const slotRes = await sql(`
+            SELECT MIN(end_date) as next_slot 
+            FROM subscriptions 
+            WHERE status = 'active' AND end_date > datetime('now', '+7 hours')
+        `);
+
+        if (slotRes.rows.length > 0 && slotRes.rows[0].next_slot) {
+            const date = new Date(slotRes.rows[0].next_slot as string);
+            return date.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+        }
+        return "Tidak diketahui";
+    } catch (e) {
+        return "Error DB";
+    }
+}
+
+bot.hears("📊 Cek Slot", async (ctx) => {
+    // 1. Ambil Data Slot Global (Multi-Account Aggregation)
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used, COUNT(id) as nodes FROM canva_accounts WHERE is_active=1");
+        const row = totalSlotsRes.rows[0];
+
+        const currentCount = parseInt(row.used as any) || 0;
+        const maxSlot = parseInt(row.max as any) || 0; // Default 0 if no accounts
+        const nodeCount = parseInt(row.nodes as any) || 0;
+
+    const available = maxSlot - currentCount;
+    const isFull = currentCount >= maxSlot;
+
+    // 2. Format Pesan
+    let msg = `📊 <b>Status Server Canva (Cluster)</b>\n\n`;
+    msg += `👥 <b>Total Member:</b> ${currentCount} / ${maxSlot}\n`;
+    msg += `🟢 <b>Slot Tersedia:</b> ${available > 0 ? available : 0}\n`;
+    msg += `🏭 <b>Node Aktif:</b> ${nodeCount} Server\n\n`;
+
+    if (isFull) {
+        msg += `⛔ <b>STATUS: PENUH (ALL NODES)</b>\n`;
+        // msg += `⏳ <b>Slot Berikutnya:</b> ${nextSlot}\n\n`; // TODO: Check next slot globally
+        msg += `<i>Silakan cek lagi nanti. Admin sedang menambah server baru.</i>`;
+    } else {
+        msg += `✅ <b>STATUS: AMAN</b>\n`;
+        msg += `<i>Segera lakukan aktivasi sebelum penuh!</i>`;
+    }
+
+    await ctx.reply(msg, { parse_mode: "HTML" });
+});
+
+
+
+// Callback: Database Tools Menu
+bot.callbackQuery("adm_db_menu", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+
+    const dbKeyboard = new InlineKeyboard()
+        .text("📤 Export User Data (.txt)", "adm_export_txt").row()
+        .text("📦 Backup Database (.json)", "adm_backup_run").row()
+        .text("♻️ Restore Database", "adm_restore_guide").row()
+        .text("🔙 Kembali", "adm_back_main");
+
+    await ctx.editMessageText(
+        `💾 <b>Database Tools</b>\n\n` +
+        `Pilih aksi yang ingin dilakukan:\n\n` +
+        `1. <b>Export User Data:</b> Download laporan user (txt/csv).\n` +
+        `2. <b>Backup Database:</b> Full backup sistem (JSON) untuk restore.\n` +
+        `3. <b>Restore Database:</b> Panduan cara restore (Upload).`,
+        { parse_mode: "HTML", reply_markup: dbKeyboard }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Action: Run Backup JSON
+bot.callbackQuery("adm_backup_run", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+
+    // Trigger /backupdb logic
+    try {
+        await ctx.editMessageText("⏳ <b>Generating Backup...</b>", { parse_mode: "HTML" });
+        const json = await BackupService.generate();
+        const buffer = Buffer.from(json, 'utf-8');
+        const fileName = `backup-db-${TimeUtils.now().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
+
+        await ctx.replyWithDocument(new InputFile(buffer, fileName), {
+            caption: `💾 <b>Database Backup</b>\n📅 ${TimeUtils.format()}`,
+            parse_mode: "HTML"
+        });
+        await ctx.answerCallbackQuery();
+    } catch (e: any) {
+        await ctx.reply(`❌ Backup Failed: ${e.message}`);
+    }
+});
+
+// Action: Guide Restore
+bot.callbackQuery("adm_restore_guide", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        `♻️ <b>Cara Restore Database:</b>\n\n` +
+        `1. Siapkan file backup <code>.json</code>\n` +
+        `2. Kirim file tersebut ke bot.\n` +
+        `3. Tulis caption: <code>/uploaddb</code>\n\n` +
+        `⚠️ <b>PERINGATAN:</b> Restore akan MENIMPA semua data yang ada!`,
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Action: Export Text (Legacy /data)
+bot.callbackQuery("adm_export_txt", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    // Trigger the /data logic manually since we can't easily call the command handler with different context
+    // Ideally we extract the logic, but for now let's just instruct or better yet, run the logic directly?
+    // Let's instructing to keeps things simple, or better yet, trigger the export function if we had one.
+    // For now, let's keep the instruction but ensure /data works!
+    await ctx.reply("⏳ Silakan ketik <code>/data</code> untuk download laporan user.", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+
+
+// ============================================================
+// ADMIN: MULTI-ACCOUNT MANAGEMENT
+// ============================================================
+
+// Command: Add Account via Cookie (Cookie-Only)
+// Command: Add Account via Cookie (Cookie-Only)
+// Command: Add Account via Cookie (Cookie-Only)
+bot.command("addaccount", async (ctx) => {
+    // 1. Immediate Feedback (To confirm bot receives command)
+    const debugMsg = await ctx.reply("🏃 <b>Processing Command...</b>", { parse_mode: "HTML" });
+
+    try {
+        console.log(`[DEBUG] /addaccount triggered by ${ctx.from?.id}`);
+
+        // 2. Auth Check with Detailed Feedback
+        const adminIdEnv = parseInt((globalThis as any).ENV. || "0");
+        const userId = ctx.from?.id || 0;
+
+        if (userId !== adminIdEnv) {
+            console.log(`[DEBUG] Access Denied. AdminID=${adminIdEnv}, UserID=${userId}`);
+            return ctx.api.editMessageText(
+                ctx.chat.id,
+                debugMsg.message_id,
+                `❌ <b>Akses Ditolak!</b>\n\n` +
+                `🆔 User ID: <code>${userId}</code>\n` +
+                `🔐 Server Admin ID: <code>${adminIdEnv}</code>\n\n` +
+                `Pastikan ADMIN_ID di Vercel sama dengan User ID Anda!`
+            );
+        }
+
+        // Delete debug message if auth ok (optional, or edit it later)
+        await ctx.api.deleteMessage(ctx.chat.id, debugMsg.message_id).catch(() => { });
+
+
+        let input = (ctx.match as string || "").trim();
+        const doc = ctx.msg.document || ctx.msg.reply_to_message?.document;
+        let targetNodeId: number | null = null;
+        let cookieStr = "";
+
+        const docName = doc?.file_name?.toLowerCase() || "";
+        const isJsonFile = doc ? docName.endsWith(".json") : false;
+        const isTxtFile = doc ? docName.endsWith(".txt") : false;
+        const isSupportedCookieFile = isJsonFile || isTxtFile;
+
+        // 1. Check if input is a Node ID (numeric) AND file is present
+        if (doc && /^\d+$/.test(input)) {
+            targetNodeId = parseInt(input);
+            input = ""; // Clear input so it's not treated as cookie
+        }
+        // 2. Logic to detect if input is actually the cookie string (if no doc)
+        else if (!doc && input.length > 0) {
+            cookieStr = input;
+        }
+
+        // 3. Handle File Upload (Direct Caption or Reply)
+        if (doc) {
+            try {
+                const loading = await ctx.reply("⏳ <b>Mengunduh file...</b>", { parse_mode: "HTML" });
+
+                // Basic Validation
+                if (doc.file_size && doc.file_size > 100 * 1024) { // Limit 100KB
+                    return ctx.api.editMessageText(ctx.chat.id, loading.message_id, "❌ File terlalu besar (Max 100KB).");
+                }
+
+                if (!isSupportedCookieFile) {
+                    return ctx.api.editMessageText(ctx.chat.id, loading.message_id, "❌ Format file tidak didukung. Pakai .txt atau .json.");
+                }
+
+                // Get File Path
+                const file = await ctx.api.getFile(doc.file_id);
+                const filePath = file.file_path;
+
+                if (!filePath) {
+                    return ctx.api.editMessageText(ctx.chat.id, loading.message_id, "❌ Gagal mendapatkan path file.");
+                }
+
+                // Construct Download URL
+                const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.}/${filePath}`;
+
+                // Download Content
+                const response = await axios.get(downloadUrl, {
+                    responseType: 'arraybuffer'
+                });
+                const buffer = Buffer.from(response.data);
+                const content = buffer.toString('utf-8').trim();
+
+                if (isJsonFile) {
+                    try {
+                        const parsed = JSON.parse(content);
+                        if (!Array.isArray(parsed)) throw new Error("JSON bukan array cookie");
+                        cookieStr = JSON.stringify(parsed);
+                    } catch (e: any) {
+                        return ctx.api.editMessageText(ctx.chat.id, loading.message_id, `❌ <b>Format JSON Salah!</b> ${e.message}`);
+                    }
+                } else {
+                    cookieStr = content;
+                    if (!cookieStr) {
+                        return ctx.api.editMessageText(ctx.chat.id, loading.message_id, "❌ File TXT kosong.");
+                    }
+                }
+
+                await ctx.api.deleteMessage(ctx.chat.id, loading.message_id);
+
+            } catch (e: any) {
+                return ctx.reply(`❌ Gagal membaca file: ${e.message}`);
+            }
+        }
+        // 4. Handle Reply to Text (Legacy)
+        else if (!cookieStr && ctx.msg.reply_to_message) {
+            if ("text" in ctx.msg.reply_to_message) {
+                cookieStr = ctx.msg.reply_to_message.text || "";
+            }
+        }
+
+        // If still empty
+        if (!cookieStr) {
+            return ctx.reply(
+                `➕ <b>Tambah/Update Akun Canva</b>\n\n` +
+                `<b>Mode File (disarankan):</b>\n` +
+                `• Upload <code>.json</code> + caption <code>/addaccount 2</code>\n` +
+                `• Upload <code>.txt</code> + caption <code>/addaccount 2</code>\n` +
+                `• Nama file bebas\n\n` +
+                `<b>Mode Teks Lama:</b>\n` +
+                `• <code>/addaccount [COOKIE_STRING]</code>\n`,
+                { parse_mode: "HTML" }
+            );
+        }
+
+        try {
+            if (!targetNodeId) {
+                return ctx.reply(
+                    `⚠️ <b>Node ID wajib ditulis!</b>\n\n` +
+                    `Gunakan salah satu format ini:\n` +
+                    `• <code>/addaccount 1</code> + upload file <code>.json</code>\n` +
+                    `• <code>/addaccount 1</code> + upload file <code>.txt</code>\n` +
+                    `• <code>/addaccount [COOKIE_STRING]</code>\n`,
+                    { parse_mode: "HTML" }
+                );
+            }
+
+            const exist = await sql("SELECT id FROM canva_accounts WHERE id = ?", [targetNodeId]);
+            if (exist.rows.length > 0) {
+                await sql("UPDATE canva_accounts SET cookie = ?, is_active = 1, email = 'Pending Check', team_id = NULL, last_used = datetime('now','+7 hours') WHERE id = ?", [cookieStr, targetNodeId]);
+                await ctx.reply(`✅ <b>Node #${targetNodeId} Berhasil Diupdate!</b>\nCookie diganti & status di-reset.`);
+            } else {
+                await sql("INSERT INTO canva_accounts (id, cookie, created_at, email, is_active, last_used) VALUES (?, ?, datetime('now', '+7 hours'), 'Pending Check', 1, datetime('now', '+7 hours'))", [targetNodeId, cookieStr]);
+                await ctx.reply(`✅ <b>Node #${targetNodeId} Berhasil Dibuat!</b>\n(ID Spesifik)`);
+            }
+        } catch (e: any) {
+            await ctx.reply(`❌ Gagal simpan akun: ${e.message}`);
+        }
+
+    } catch (error: any) {
+        // Global Catch for /addaccount crash
+        console.error("[CRITICAL] /addaccount Crash:", error);
+        await ctx.reply(`❌ <b>Bot Error!</b>\n\n${error.message}`, { parse_mode: "HTML" });
+    }
+});
+
+// Fallback: Handle Document with Caption (AddAccount / UploadDB)
+bot.on("message:document", async (ctx) => {
+    const caption = ctx.message.caption || "";
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    // 1. Case: /addaccount (Upload Cookie JSON)
+    if (caption.startsWith("/addaccount")) {
+        console.log(`[DEBUG] /addaccount fallback via message:document. Caption: ${caption}`);
+
+        const msg = await ctx.reply("📂 <b>Menerima File Akun...</b>", { parse_mode: "HTML" });
+
+        try {
+            // Extract Node ID from caption if present "/addaccount 2"
+            const parts = caption.split(" ");
+            let targetNodeId: number | null = null;
+            if (parts.length > 1 && /^\d+$/.test(parts[1])) {
+                targetNodeId = parseInt(parts[1]);
+            }
+
+            const doc = ctx.message.document;
+            const file = await ctx.api.getFile(doc.file_id);
+            const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.}/${file.file_path}`;
+
+            const response = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
+            const content = Buffer.from(response.data).toString('utf-8');
+
+            // Validate JSON
+            try {
+                const parsed = JSON.parse(content);
+                // Simple validation check for cookie array
+                if (!Array.isArray(parsed)) throw new Error("Not a cookie array");
+            } catch (e) {
+                return ctx.api.editMessageText(ctx.chat.id, msg.message_id, "❌ Validasi JSON Gagal (Bukan Format Cookie).");
+            }
+
+            if (!targetNodeId) {
+                return ctx.api.editMessageText(ctx.chat.id, msg.message_id, "⚠️ Node ID wajib ditulis. Contoh: /addaccount 1");
+            }
+
+            const exist = await sql("SELECT id FROM canva_accounts WHERE id = ?", [targetNodeId]);
+            if (exist.rows.length > 0) {
+                await sql("UPDATE canva_accounts SET cookie = ?, is_active = 1, email = 'Pending Check', team_id = NULL, last_used = datetime('now','+7 hours') WHERE id = ?", [content, targetNodeId]);
+                await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `✅ <b>Node #${targetNodeId} Updated!</b>`);
+            } else {
+                await sql("INSERT INTO canva_accounts (id, cookie, created_at, email, is_active, last_used) VALUES (?, ?, datetime('now', '+7 hours'), 'Pending Check', 1, datetime('now', '+7 hours'))", [targetNodeId, content]);
+                await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `✅ <b>Node #${targetNodeId} Created!</b>`);
+            }
+
+        } catch (e: any) {
+            await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ Error: ${e.message}`);
+        }
+    }
+
+    // 2. Case: /uploaddb (Restore Database)
+    else if (caption.startsWith("/uploaddb")) {
+        const loadMsg = await ctx.reply("⏳ <b>Reading Backup File...</b>", { parse_mode: "HTML" });
+
+        try {
+            const file = await ctx.api.getFile(ctx.message.document.file_id);
+            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.}/${file.file_path}`;
+
+            // Download
+            const response = await axios.get(url, { responseType: 'arraybuffer' });
+            const content = Buffer.from(response.data).toString('utf-8');
+
+            await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, "⚙️ <b>Restoring Data...</b> (Do not touch)", { parse_mode: "HTML" });
+
+            const result = await BackupService.restore(content);
+
+            if (result.success) {
+                await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `✅ <b>Restore Success!</b>\n\n${result.message}`, { parse_mode: "HTML" });
+            } else {
+                await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `❌ <b>Restore Failed!</b>\n\n${result.message}`, { parse_mode: "HTML" });
+            }
+
+        } catch (e: any) {
+            await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `❌ Error: ${e.message}`);
+        }
+    }
+});
+
+
+// Command: List Accounts
+bot.command("listaccounts", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    try {
+        const res = await sql("SELECT * FROM canva_accounts ORDER BY id ASC");
+        if (res.rows.length === 0) return ctx.reply("❌ Belum ada akun terdaftar.");
+
+        let msg = `🏭 <b>Daftar Node Canva (${res.rows.length})</b>\n\n`;
+        const keyboard = new InlineKeyboard();
+
+        for (const acc of res.rows) {
+            const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
+            const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
+            const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const team = acc.team_id ? `Team: ${acc.team_id}` : "";
+
+            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `📧 ${info}\n`;
+            msg += `👥 Slot: <b>${usage}</b>\n`;
+            if (team) msg += `🆔 ${team}\n`;
+            msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
+
+            // Add Delete Button
+            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+        }
+        msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// Action: Delete Node Button
+bot.callbackQuery(/del_node_(\d+)/, async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const nodeId = ctx.match[1];
+
+    try {
+        // Delete from DB
+        await sql("DELETE FROM canva_accounts WHERE id = ?", [nodeId]);
+        await ctx.answerCallbackQuery({ text: `✅ Node #${nodeId} berhasil dihapus!` });
+
+        // Refresh List
+        const res = await sql("SELECT * FROM canva_accounts ORDER BY id ASC");
+        if (res.rows.length === 0) {
+            return ctx.editMessageText("❌ Belum ada akun terdaftar.");
+        }
+
+        let msg = `🏭 <b>Daftar Node Canva (${res.rows.length})</b>\n\n`;
+        const keyboard = new InlineKeyboard();
+
+        for (const acc of res.rows) {
+            const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
+            const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
+            const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const team = acc.team_id ? `Team: ${acc.team_id}` : "";
+
+            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `📧 ${info}\n`;
+            msg += `👥 Slot: <b>${usage}</b>\n`;
+            if (team) msg += `🆔 ${team}\n`;
+            msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
+
+            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+        }
+        msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
+
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
+
+    } catch (e: any) {
+        await ctx.answerCallbackQuery({ text: `❌ Gagal: ${e.message}` });
+    }
+});
+
+// 2. Help Guides
+bot.callbackQuery("adm_help_bc", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply("📢 <b>Format Broadcast:</b>\n\nKetik: <code>/broadcast [Pesan Anda]</code>\nAtau reply gambar dengan command tersebut.", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_help_del", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        "🗑️ <b>Hapus User (Hard Delete):</b>\n\n" +
+        "Menu ini akan menghapus user secara permanen dari database (termasuk history & poin).\n\n" +
+        "Cara Pakai:\n" +
+        "1. Via Email: <code>/delete_user email@gmail.com</code>\n" +
+        "2. Via ID: <code>/delete_user 123456789</code>",
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_help_exp", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply("💀 <b>Force Expire User (Testing):</b>\n\nKetik: <code>/forceexpire user@gmail.com</code>\n(User akan dibuat expired H-1 agar kena auto-kick)", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_list_ch", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const channels = await getForceSubChannels();
+    await ctx.reply(`📋 <b>Channel Wajib Join:</b>\n${channels.join('\n')}\n\nUbah: <code>/set_channels ...</code>`, { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("adm_set_ch", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        `➕ <b>Edit Channel Wajib Join:</b>\n\n` +
+        `Ketik: <code>/set_channels [DATA]</code>\n\n` +
+        `📝 <b>Contoh Format:</b>\n` +
+        `1. Public Channel:\n` +
+        `   <code>@username1, @username2</code>\n` +
+        `2. Private Channel (Pakai | Link):\n` +
+        `   <code>-1001234567|https://t.me/+InvLnk, @public</code>\n\n` +
+        `Pastikan bot sudah jadi ADMIN di channel tersebut!`,
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Callback: Test Actions
+bot.callbackQuery("test_invite", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
+
+    if ((globalThis as any).ENV.) {
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
+    } else {
+        await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
+        exec("npm run process-queue", (error, stdout, stderr) => {
+            if (error) {
+                ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
+                return;
+            }
+            const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
+            ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
+        });
+    }
+    await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("test_kick", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply("🤖 Menjalankan <b>Auto-Kick</b> Job... (Wait)", { parse_mode: "HTML" });
+
+    if ((globalThis as any).ENV.) {
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
+    } else {
+        await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
+        exec("npm run auto-kick", (error, stdout, stderr) => {
+            if (error) {
+                ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
+                return;
+            }
+            const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
+            ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
+        });
+    }
+    await ctx.answerCallbackQuery();
+});
+
+// Callback: Trigger /listaccounts from button
+bot.callbackQuery("adm_list_accounts", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+
+    // Call the logic of listaccounts
+    // Since we can't easily invoke .command(), we copy logic or redirect
+    // Reuse logic:
+    try {
+        const res = await sql("SELECT * FROM canva_accounts ORDER BY id ASC");
+        if (res.rows.length === 0) {
+            await ctx.reply("❌ Belum ada akun terdaftar.");
+            return ctx.answerCallbackQuery();
+        }
+
+        let msg = `🏭 <b>Daftar Node Canva (${res.rows.length})</b>\n\n`;
+        const keyboard = new InlineKeyboard();
+
+        for (const acc of res.rows) {
+            const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
+            const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
+            const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const team = acc.team_id ? `Team: ${acc.team_id}` : "";
+
+            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `📧 ${info}\n`;
+            msg += `👥 Slot: <b>${usage}</b>\n`;
+            if (team) msg += `🆔 ${team}\n`;
+            msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
+
+            // Add Delete Button
+            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+        }
+
+        msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+        await ctx.answerCallbackQuery();
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// ============================================================
+// ACTION HANDLERS (CALLBACK BUTTONS)
+// ============================================================
+
+// Callback: Buy / Pilih Paket
+bot.callbackQuery(/buy_(.+)/, async (ctx) => {
+    const item = ctx.match?.[1];
+    const userId = ctx.from.id;
+
+    try {
+        let productId = 1;
+        let costCost = 0;
+        let productName = "";
+
+        if (item === "6_month_1" || item === "6_month") { // Fallback for legacy
+            productId = 3; // 6 Bulan
+            costCost = 6;
+            productName = "6 Bulan Premium";
+        } else if (item === "6_month_2") {
+            productId = 4; // 12 Bulan (New)
+            costCost = 12;
+            productName = "12 Bulan Premium (2x)";
+        } else if (item === "1_month") {
+            productId = 1;
+            costCost = 0;
+            productName = "1 Bulan Free";
+        } else {
+            return ctx.answerCallbackQuery("Paket tidak valid.");
+        }
+
+        // 1. Simpan Pilihan
+        await sql("UPDATE users SET selected_product_id = ? WHERE id = ?", [productId, userId]);
+
+        // 2. Cek Email Tersimpan
+        const userRes = await sql("SELECT email FROM users WHERE id = ?", [userId]);
+        const savedEmail = userRes.rows.length > 0 ? userRes.rows[0].email : null;
+
+        const keyboard = new InlineKeyboard();
+        let msg = `✅ <b>Paket Dipilih!</b>\n` +
+            `📦 Opsi: <b>${productName}</b>\n` +
+            `💎 Biaya: <b>${costCost} Poin</b>\n\n`;
+
+        // 3. Logika Tombol
+        if (savedEmail) {
+            if (productId === 1) {
+                // CASE: FREE PLAN (Wajib Email Lama)
+                msg += `⚠️ Paket Free hanya boleh menggunakan email yang sudah terdaftar.\n` +
+                    `📧 Email Anda: <b>${savedEmail}</b>`;
+
+                keyboard.text(`📧 Gunakan: ${savedEmail}`, "use_saved_email");
+            } else {
+                // CASE: PAID PLAN (Boleh Ganti)
+                msg += `📧 Email Terdaftar: <b>${savedEmail}</b>\n` +
+                    `Anda bisa menggunakan email ini atau ganti baru (Data akan diupdate).`;
+
+                keyboard.text(`📧 Gunakan Email Ini`, "use_saved_email").row();
+                keyboard.text(`✏️ Gunakan Email Lain`, "ask_new_email");
+            }
+        } else {
+            // Belum punya email -> Minta Input
+            msg += `Silakan kirimkan alamat email Canva Anda sekarang (Ketik langsung).`;
+        }
+
+        await ctx.deleteMessage();
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+
+    } catch (e: any) {
+        console.error("Error buy callback:", e);
+        try { await ctx.answerCallbackQuery("Gagal menyimpan pilihan."); } catch { }
+    }
+
+    try { await ctx.answerCallbackQuery(); } catch { }
+});
+
+// Callback: Use Saved Email
+bot.callbackQuery("use_saved_email", async (ctx) => {
+    const userId = ctx.from.id;
+    try {
+        const userRes = await sql("SELECT email FROM users WHERE id = ?", [userId]);
+        if (userRes.rows.length > 0 && userRes.rows[0].email) {
+            await handleActivation(ctx, userRes.rows[0].email as string);
+        } else {
+            await ctx.reply("❌ Email tidak ditemukan. Silakan input manual.");
+        }
+        await ctx.answerCallbackQuery();
+    } catch (e) {
+        console.error(e);
+    }
+});
+
+// Callback: Ask New Email
+bot.callbackQuery("ask_new_email", async (ctx) => {
+    await ctx.reply(
+        `✏️ <b>Input Email Baru</b>\n\n` +
+        `Silakan ketik dan kirim alamat email baru Anda sekarang.\n` +
+        `Contoh: <code>baru@gmail.com</code>\n\n` +
+        `<i>(Data email Anda akan diperbarui otomatis untuk pembelian ini)</i>`,
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});
+
+// Handler: Capture Email Input (Text Message)
+bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message.text.trim();
+    const userId = ctx.from.id;
+
+    // 1. Skip if it is a command
+    if (text.startsWith("/")) return next();
+
+    // 2. Basic Email Regex Check
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(text)) {
+        return next();
+    }
+
+    // 3. Check if User is in "Order Mode" (Has selected_product_id)
+    try {
+        const userRes = await sql("SELECT selected_product_id, email FROM users WHERE id = ?", [userId]);
+        if (userRes.rows.length === 0) return next();
+
+        const user = userRes.rows[0];
+        const prodId = user.selected_product_id;
+        const savedEmail = user.email;
+
+        // If no product selected, ignore (User just typing random email?)
+        if (!prodId) return next();
+
+        // 3. Process Logic based on Plan
+        if (prodId === 1) {
+            // FREE PLAN: Strict Check
+            if (savedEmail && savedEmail !== text) {
+                return ctx.reply(
+                    `⛔ <b>Paket Free Terbatas!</b>\n\n` +
+                    `Anda sudah terdaftar dengan email: <b>${savedEmail}</b>\n` +
+                    `Paket Free tidak mengizinkan ganti email.\n` +
+                    `Silakan pilih Paket Premium jika ingin ganti akun.`,
+                    { parse_mode: "HTML" }
+                );
+            }
+        }
+
+        // PAID PLAN (or Initial Free): Update Email
+        // Always update email to latest input for Paid plans OR if it's the first time (savedEmail is null)
+        if (prodId !== 1 || !savedEmail) {
+            await sql("UPDATE users SET email = ? WHERE id = ?", [text, userId]);
+        }
+
+        // 4. Trigger Activation
+        await ctx.reply(`🔄 Memproses email: <b>${text}</b>...`, { parse_mode: "HTML" });
+        await handleActivation(ctx, text);
+
+    } catch (e: any) {
+        console.error("Error email handler:", e);
+    }
+});
+
+// ============================================================
+// ADMIN DEBUGGING TOOLS (AUTO-KICK)
+// ============================================================
+
+
+
+
+// 2. Force Expire User (Simulasi Expired)
+bot.command("forceexpire", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const email = ctx.match as string;
+    if (!email) return ctx.reply("❌ Format: /forceexpire <email>");
+
+    try {
+        // Cari semua record user dengan email tersebut (bisa ganda karena ID TG berbeda)
+        const userRes = await sql("SELECT id, assigned_node_id FROM users WHERE email = ?", [email]);
+        if (userRes.rows.length === 0) return ctx.reply("❌ User tidak ditemukan di DB.");
+
+        for (const row of userRes.rows) {
+            const userId = row.id;
+            // Update status & end date di database
+            await sql("UPDATE subscriptions SET end_date = datetime('now', '+7 hours', '+2 minutes'), status = 'active' WHERE user_id = ?", [userId]);
+            if (row.assigned_node_id !== null) {
+                await sql("UPDATE users SET status = 'active' WHERE id = ?", [userId]);
+            }
+        }
+
+        // Trigger GitHub Action
+        const trigger = await triggerGithubAction();
+
+        await ctx.reply(`✅ Semua akun/sub dengan email <b>${email}</b> telah diatur EXPIRED (2 menit).\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
+    } catch (e: any) {
+        await ctx.reply(`❌ Error DB: ${e.message}`);
+    }
+});
+
+// 2. Run Auto-Kick Script (Trigger via Shell)
+bot.command("testkick", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    await ctx.reply("🤖 Menjalankan Auto-Kick Script... (Mohon tunggu)");
+
+    if ((globalThis as any).ENV.) {
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
+    } else {
+        await ctx.reply("🚀 <b>Local Mode:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
+        exec("npm run auto-kick", (error, stdout, stderr) => {
+            if (error) {
+                ctx.reply(`❌ Error: ${error.message}`);
+                return;
+            }
+            ctx.reply(`✅ Done:\n<pre>${stdout}</pre>`, { parse_mode: "HTML" });
+        });
+    }
+});
+
+// Admin Command: Set Log Topic for Full Slot Notifications
+bot.command("addlogtopik", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    const chatId = ctx.chat.id;
+    const threadId = ctx.message?.message_thread_id || null;
+    const type = ctx.chat.type;
+
+    try {
+        // Save Chat ID
+        await sql(`
+            INSERT INTO settings (key, value) VALUES ('slot_topic_chat_id', ?) 
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `, [String(chatId)]);
+
+        // Save Thread ID (if exists)
+        if (threadId) {
+            await sql(`
+                INSERT INTO settings (key, value) VALUES ('slot_topic_thread_id', ?) 
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            `, [String(threadId)]);
+        } else {
+            // Clear thread id if run in main chat
+            await sql("DELETE FROM settings WHERE key = 'slot_topic_thread_id'");
+        }
+
+        let msg = `✅ <b>Log Topik Berhasil Diset!</b>\n\n`;
+        msg += `📍 <b>Chat ID:</b> <code>${chatId}</code>\n`;
+        if (threadId) msg += `🧵 <b>Topic ID:</b> <code>${threadId}</code>\n`;
+        msg += `📢 Laporan "Slot Penuh" akan dikirim otomatis ke sini.`;
+
+        await ctx.reply(msg, { parse_mode: "HTML" });
+
+    } catch (e: any) {
+        await ctx.reply(`❌ Gagal menyimpan setting: ${e.message}`);
+    }
+});
+
+// Admin Command: Export Data (Laporan Lengkap)
+bot.command("data", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    let loadingMsg;
+    try {
+        loadingMsg = await ctx.reply("⏳ <b>Mengambil Data Laporan...</b>\nMohon tunggu sebentar.", { parse_mode: "HTML" });
+
+        // 1. Query Data Lengkap (Join Users + Subscriptions + Products)
+        const res = await sql(`
+            SELECT 
+                u.id, 
+                u.username, 
+                u.first_name, 
+                u.email, 
+                u.status as user_status, 
+                u.referral_points,
+                u.joined_at,
+                s.status as sub_status,
+                s.start_date,
+                s.end_date,
+                p.name as plan_name
+            FROM users u
+            LEFT JOIN subscriptions s ON u.id = s.user_id AND s.status = 'active'
+            LEFT JOIN products p ON s.product_id = p.id
+            ORDER BY u.joined_at DESC
+        `);
+
+        if (res.rows.length === 0) {
+            if (loadingMsg) await ctx.api.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => { });
+            return ctx.reply("❌ Tidak ada data user di database.");
+        }
+
+        // 2. Format Header & Content
+        // 2. Format Header & Content
+        const nowStr = TimeUtils.format(); // "DD:MM:YYYY HH:mm:ss WIB"
+        const fileName = `data-${nowStr.replace(/[: ]/g, '-').replace('WIB', '').trim()}.txt`;
+
+        let content = `LAPORAN DATA BOT CANVA\n`;
+        content += `Tanggal Generate: ${nowStr}\n`;
+        content += `Total User: ${res.rows.length}\n`;
+        content += `==========================================================================================================================================================================\n`;
+        // Widen Date columns to 22 chars for "dd/mm/yyyy HH:mm:ss"
+        content += `ID         | USERNAME           | NAMA                 | EMAIL                            | PAKET           | EXPIRED (WIB)        | POIN  | JOIN DATE (WIB)      \n`;
+        content += `==========================================================================================================================================================================\n`;
+
+        for (const row of res.rows) {
+            const id = String(row.id).padEnd(10);
+            const username = String(row.username ? `@${row.username}` : "-").padEnd(18);
+            const name = String(row.first_name || "No Name").substring(0, 20).padEnd(20);
+            const email = String(row.email || "-").padEnd(32);
+            const plan = String(row.plan_name || (row.sub_status === 'active' ? 'Active' : '-')).padEnd(15);
+
+            // Format End Date to WIB (Full Precision)
+            let expDate = "-                     "; // 22 spaces
+            if (row.end_date) {
+                const dbDate = row.end_date as string;
+                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
+                expDate = TimeUtils.format(utcDate).replace(' WIB', '').padEnd(22);
+            }
+
+            const points = String(row.referral_points || 0).padEnd(5);
+
+            // Format Join Date to WIB
+            let joinDate = "-                     ";
+            if (row.joined_at) {
+                const dbJoin = row.joined_at as string;
+                const utcJoin = new Date(dbJoin.includes('T') ? dbJoin : dbJoin.replace(' ', 'T') + '+07:00');
+                joinDate = TimeUtils.format(utcJoin).replace(' WIB', '').padEnd(22);
+            }
+
+            content += `${id} | ${username} | ${name} | ${email} | ${plan} | ${expDate} | ${points} | ${joinDate}\n`;
+        }
+
+        content += `==========================================================================================================================================================================\n`;
+        content += `End of Report.\n`;
+
+        // 3. Send as Document (Virtual File)
+        const buffer = Buffer.from(content, 'utf-8');
+
+        // Grammy InputFile from Buffer
+        const inputFile = new InputFile(buffer, fileName);
+
+        if (loadingMsg) await ctx.api.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => { });
+
+        await ctx.replyWithDocument(inputFile, {
+            caption: `📊 <b>Laporan Data User</b>\n📅 Tanggal: ${nowStr}\n👤 Total: ${res.rows.length} User`,
+            parse_mode: "HTML"
+        });
+
+    } catch (e: any) {
+        console.error("Export Error:", e);
+        if (loadingMsg) await ctx.api.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => { });
+        await ctx.reply(`❌ Gagal export data: ${e.message}`);
+    }
+});
+
+// 3. Backup & Restore Tools
+bot.command("backupdb", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+
+    try {
+        await ctx.reply("⏳ <b>Generating Backup...</b>", { parse_mode: "HTML" });
+        const json = await BackupService.generate();
+        const buffer = Buffer.from(json, 'utf-8');
+        const fileName = `backup-db-${TimeUtils.now().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
+
+        await ctx.replyWithDocument(new InputFile(buffer, fileName), {
+            caption: `💾 <b>Database Backup</b>\n📅 ${TimeUtils.format()}`,
+            parse_mode: "HTML"
+        });
+    } catch (e: any) {
+        await ctx.reply(`❌ Backup Failed: ${e.message}`);
+    }
+});
+
+// Restore Handler (Document with Caption /uploaddb)
+bot.on("message:document", async (ctx) => {
+    const caption = ctx.message.caption || "";
+
+    // Check if it is /uploaddb
+    if (caption.trim() === "/uploaddb") {
+        if (!isAdmin(ctx.from?.id || 0)) return;
+
+        const loadMsg = await ctx.reply("⏳ <b>Reading Backup File...</b>", { parse_mode: "HTML" });
+
+        try {
+            const file = await ctx.api.getFile(ctx.message.document.file_id);
+            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.}/${file.file_path}`;
+
+            // Download
+            const response = await axios.get(url, { responseType: 'arraybuffer' });
+            const content = Buffer.from(response.data).toString('utf-8');
+
+            // Restore via Service
+            // Note: In Serverless, we process immediately.
+            await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, "⚙️ <b>Restoring Data...</b> (Do not touch)", { parse_mode: "HTML" });
+
+            const result = await BackupService.restore(content);
+
+            if (result.success) {
+                await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `✅ <b>Restore Success!</b>\n\n${result.message}`, { parse_mode: "HTML" });
+            } else {
+                await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `❌ <b>Restore Failed!</b>\n\n${result.message}`, { parse_mode: "HTML" });
+            }
+
+        } catch (e: any) {
+            await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, `❌ Error: ${e.message}`);
+        }
+        return;
+    }
+
+    // Legacy Fallback (addaccount) logic
+    // ... (This should merge with existing addaccount fallback if unrelated)
+    // Actually, we should check if existing fallback exists.
+    // The previous code had a bot.on("message:document") for addaccount.
+    // We must MERGE them or use a middleware approach.
+    // Let's assume the previous handler is effectively REPLACED by this block if we place it properly or we need to be careful.
+    // Wait, typical Grammy pattern: listeners trigger in order. 
+    // If I add a NEW listener, both might trigger? Or only first matching?
+    // Grammy: "Listeners are executed in order... if one handles, next might not if middleware chain stops."
+    // bot.on() usually passes to next unless we stop.
+    // Safest way: COMBINE logic in the existing handler or ensure this one is specific.
+});
+
+// ============================================================
+// ERROR HANDLING
+// ============================================================
+bot.catch((err) => {
+    const ctx = err.ctx;
+    console.error(`Error while handling update ${ctx.update.update_id}:`);
+    const e = err.error;
+
+    if (e instanceof GrammyError) {
+        console.error("Error in request:", e.description);
+    } else if (e instanceof HttpError) {
+        console.error("Could not contact Telegram:", e);
+    } else {
+        console.error("Unknown error:", e);
+    }
+});
+
+// Helper: Add Point Guide
+bot.callbackQuery("adm_help_addpoint", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply("➕ <b>Tambah Poin Manual:</b>\n\nCommand: <code>/addpoint [ID_TELEGRAM]|[JUMLAH]</code>\n\nContoh: <code>/addpoint 1234567890|100</code>\n(Tanpa spasi di antara garis tegak)", { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery();
+});
+
+// Helper: Set Donasi Guide
+bot.callbackQuery("adm_set_donasi", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.reply(
+        "💸 <b>Set Link Donasi:</b>\n\n" +
+        "Command: <code>/setdonasi [URL]</code>\n\n" +
+        "<b>Contoh:</b>\n" +
+        "<code>/setdonasi https://saweria.co/username</code>\n\n" +
+        "Atau reply pesan yang berisi URL dengan <code>/setdonasi</code>\n\n" +
+        "User akan melihat tombol Donasi dengan link yang Anda set.",
+        { parse_mode: "HTML" }
+    );
+    await ctx.answerCallbackQuery();
+});

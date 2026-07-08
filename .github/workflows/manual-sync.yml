@@ -1,0 +1,50 @@
+name: Manual Full Sync (All Nodes)
+
+on:
+  repository_dispatch:
+    types: [manual_sync] # Triggered by Bot API "Sinkronisasi Manual" button
+  workflow_dispatch:      # Manual trigger from Github UI
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Install Xvfb dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+      
+      - name: Run Manual Sync Script
+        env:
+          TZ: 'Asia/Jakarta'
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          CANVA_EMAIL: ${{ secrets.CANVA_EMAIL }}
+          CANVA_PASSWORD: ${{ secrets.CANVA_PASSWORD }}
+          CANVA_COOKIES: ${{ secrets.CANVA_COOKIES }}
+          CANVA_USER_AGENT: ${{ secrets.CANVA_USER_AGENT }}
+          LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
+        run: xvfb-run --auto-servernum npm run manual-sync
+      
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_number }}
+          path: debug_screenshots/
+          if-no-files-found: ignore
