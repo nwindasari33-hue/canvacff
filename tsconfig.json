@@ -11,17 +11,9 @@
     "noEmit": true,
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"],
-  "ts-node": {
-    "compilerOptions": {
-      "module": "CommonJS",
-      "moduleResolution": "node",
-      "esModuleInterop": true
-    }
-  }
+  "include": ["src/**/*.ts"]
 }

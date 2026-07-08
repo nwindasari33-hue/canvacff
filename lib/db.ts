@@ -6,7 +6,7 @@ let _dbToken: string | null = null;
 
 function getConfig() {
     if (_dbUrl) return { url: _dbUrl!, token: _dbToken! };
-    const env = (globalThis as any).ENV || process.env;
+    const env = (globalThis as any).ENV;
     if (!env?.TURSO_DATABASE_URL) throw new Error("TURSO_DATABASE_URL tidak ditemukan di ENV");
     // Turso HTTP API requires https://, not libsql://
     _dbUrl = (env.TURSO_DATABASE_URL as string).replace("libsql://", "https://");
@@ -65,16 +65,7 @@ export async function sql(query: string, args: any[] = []): Promise<any> {
         const obj: any = {};
         cols.forEach((col: any, i: number) => {
             const cell = row[i];
-            if (!cell || cell.type === "null") {
-                obj[col.name] = null;
-            } else if (cell.type === "integer" || cell.type === "float") {
-                const num = Number(cell.value);
-                obj[col.name] = Number.isSafeInteger(num) ? num : cell.value;
-            } else if (cell.type === "text") {
-                obj[col.name] = cell.value;
-            } else {
-                obj[col.name] = cell.value ?? cell;
-            }
+            obj[col.name] = cell?.value ?? cell ?? null;
         });
         return obj;
     });

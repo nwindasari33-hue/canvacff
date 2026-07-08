@@ -702,7 +702,7 @@ bot.command("test_invite", async (ctx) => {
         );
 
         // 2. Trigger GitHub Action
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
+        const trigger = await triggerGithubAction("process_queue");
 
         await ctx.reply(
             `✅ <b>Masuk Antrian!</b>\n\n` +
@@ -1979,7 +1979,7 @@ bot.command("tesexp", async (ctx) => {
         }
 
         // Trigger GitHub Action
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
+        const trigger = await triggerGithubAction("process_queue");
 
         await ctx.reply(
             `🧪 <b>Test Expire Set!</b>\n\n` +
@@ -2523,32 +2523,16 @@ bot.callbackQuery("adm_set_ch", async (ctx) => {
 bot.callbackQuery("test_invite", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
-
-    if ((globalThis as any).ENV.VERCEL) {
-        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
-        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
-    } else {
-        await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
-        triggerGithubAction("process_queue").catch(e => console.error("Dispatch error", e));
-        return ctx.reply("🚀 GitHub Action 'process-queue' dipicu.");
-    }
+    const trigger = await triggerGithubAction("process_queue");
+    await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery("test_kick", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Kick</b> Job... (Wait)", { parse_mode: "HTML" });
-
-    if ((globalThis as any).ENV.VERCEL) {
-        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
-        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
-    } else {
-        await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        triggerGithubAction("manual_sync").catch(e => console.error("Dispatch error", e));
-        return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
-    }
+    const trigger = await triggerGithubAction("manual_sync");
+    await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     await ctx.answerCallbackQuery();
 });
 
@@ -2780,7 +2764,7 @@ bot.command("forceexpire", async (ctx) => {
         }
 
         // Trigger GitHub Action
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
+        const trigger = await triggerGithubAction("process_queue");
 
         await ctx.reply(`✅ Semua akun/sub dengan email <b>${email}</b> telah diatur EXPIRED (2 menit).\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
     } catch (e: any) {
@@ -2791,18 +2775,9 @@ bot.command("forceexpire", async (ctx) => {
 // 2. Run Auto-Kick Script (Trigger via Shell)
 bot.command("testkick", async (ctx) => {
     if (!isAdmin(ctx.from?.id || 0)) return;
-
     await ctx.reply("🤖 Menjalankan Auto-Kick Script... (Mohon tunggu)");
-
-    if ((globalThis as any).ENV.VERCEL) {
-        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction((globalThis as any).ENV);
-        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
-    } else {
-        await ctx.reply("🚀 <b>Local Mode:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        triggerGithubAction("manual_sync").catch(e => console.error("Dispatch error", e));
-        return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
-    }
+    const trigger = await triggerGithubAction("manual_sync");
+    await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
 });
 
 // Admin Command: Set Log Topic for Full Slot Notifications
