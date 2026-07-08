@@ -2116,7 +2116,7 @@ bot.callbackQuery("adm_backup_run", async (ctx) => {
     try {
         await ctx.editMessageText("⏳ <b>Generating Backup...</b>", { parse_mode: "HTML" });
         const json = await BackupService.generate();
-        const buffer = Buffer.from(json, 'utf-8');
+        const buffer = new TextEncoder().encode(json);
         const fileName = `backup-db-${TimeUtils.now().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
 
         await ctx.replyWithDocument(new InputFile(buffer, fileName), {
@@ -2896,7 +2896,7 @@ bot.command("data", async (ctx) => {
         content += `End of Report.\n`;
 
         // 3. Send as Document (Virtual File)
-        const buffer = Buffer.from(content, 'utf-8');
+        const buffer = new TextEncoder().encode(content);
 
         // Grammy InputFile from Buffer
         const inputFile = new InputFile(buffer, fileName);
@@ -2922,7 +2922,7 @@ bot.command("backupdb", async (ctx) => {
     try {
         await ctx.reply("⏳ <b>Generating Backup...</b>", { parse_mode: "HTML" });
         const json = await BackupService.generate();
-        const buffer = Buffer.from(json, 'utf-8');
+        const buffer = new TextEncoder().encode(json);
         const fileName = `backup-db-${TimeUtils.now().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
 
         await ctx.replyWithDocument(new InputFile(buffer, fileName), {
