@@ -6,12 +6,12 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "verify-channel": "ts-node scripts/verify_channel.ts",
-    "process-queue": "ts-node scripts/process_queue.ts",
-    "auto-kick": "ts-node scripts/auto_kick.ts",
-    "sync-members": "ts-node scripts/sync_member_count.ts",
+    "verify-channel": "tsx scripts/verify_channel.ts",
+    "process-queue": "tsx scripts/process_queue.ts",
+    "auto-kick": "tsx scripts/auto_kick.ts",
+    "sync-members": "tsx scripts/sync_member_count.ts",
     "maintenance": "npm run verify-channel && npm run process-queue && npm run auto-kick && npm run sync-members",
-    "manual-sync": "ts-node scripts/manual_full_sync.ts"
+    "manual-sync": "tsx scripts/manual_full_sync.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.5.6",
