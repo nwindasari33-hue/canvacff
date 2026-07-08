@@ -25,7 +25,7 @@ export default {
 
         // Handle Telegram Webhook
         if (url.pathname === "/api/webhook") {
-            const handleUpdate = webhookCallback(bot, "cloudflare");
+            const handleUpdate = webhookCallback(bot, "cloudflare-mod");
             return (handleUpdate as any)(request);
         }
 
