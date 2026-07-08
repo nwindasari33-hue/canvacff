@@ -1642,7 +1642,11 @@ bot.callbackQuery("adm_refresh_code", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     
     // 1. Alert that request is starting
-    await ctx.answerCallbackQuery("Sistem pembersihan masif diaktifkan...");
+    try {
+        await ctx.answerCallbackQuery("Sistem pembersihan masif diaktifkan...");
+    } catch (e) {
+        console.warn("Failed to answer callback query:", e);
+    }
     
     // 2. Trigger GHA with event "manual_sync"
     const trigger = await triggerGithubAction("manual_sync");
