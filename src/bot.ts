@@ -44,7 +44,7 @@ bot.command("pingver", async (ctx) => {
 // ============================================================
 
 // Cek apakah user Admin
-const ADMIN_ID = parseInt(process.env.ADMIN_ID || "0");
+const ADMIN_ID = parseInt((globalThis as any).ENV.ADMIN_ID || "0");
 const isAdmin = (id: number) => id === ADMIN_ID;
 
 // ============================================================
@@ -75,7 +75,7 @@ async function getForceSubChannels(): Promise<string[]> {
     }
 
     if (!raw) {
-        raw = process.env.FORCE_SUB_CHANNELS || "";
+        raw = (globalThis as any).ENV.FORCE_SUB_CHANNELS || "";
     }
 
     return raw.split(',').map(c => c.trim()).filter(c => c);
@@ -1858,7 +1858,7 @@ bot.callbackQuery("adm_cookie", async (ctx) => {
 // Command: Debug Admin Status (Public)
 bot.command("debug", async (ctx) => {
     const userId = ctx.from?.id || 0;
-    const adminIdEnv = process.env.ADMIN_ID || "NOT SET";
+    const adminIdEnv = (globalThis as any).ENV.ADMIN_ID || "NOT SET";
     const isAdminUser = isAdmin(userId);
 
     await ctx.reply(
@@ -2167,7 +2167,7 @@ bot.command("addaccount", async (ctx) => {
         console.log(`[DEBUG] /addaccount triggered by ${ctx.from?.id}`);
 
         // 2. Auth Check with Detailed Feedback
-        const adminIdEnv = parseInt(process.env.ADMIN_ID || "0");
+        const adminIdEnv = parseInt((globalThis as any).ENV.ADMIN_ID || "0");
         const userId = ctx.from?.id || 0;
 
         if (userId !== adminIdEnv) {
@@ -2229,7 +2229,7 @@ bot.command("addaccount", async (ctx) => {
                 }
 
                 // Construct Download URL
-                const downloadUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${filePath}`;
+                const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${filePath}`;
 
                 // Download Content
                 const response = await (await fetch(downloadUrl)).arrayBuffer();
@@ -2329,7 +2329,7 @@ bot.on("message:document", async (ctx) => {
 
             const doc = ctx.message.document;
             const file = await ctx.api.getFile(doc.file_id);
-            const downloadUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+            const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
 
             const response = await (await fetch(downloadUrl)).arrayBuffer();
             const content = new TextDecoder('utf-8').decode(response);
@@ -2367,7 +2367,7 @@ bot.on("message:document", async (ctx) => {
 
         try {
             const file = await ctx.api.getFile(ctx.message.document.file_id);
-            const url = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
 
             // Download
             const response = await (await fetch(url)).arrayBuffer();
@@ -2520,7 +2520,7 @@ bot.callbackQuery("test_invite", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
 
-    if (process.env.VERCEL) {
+    if ((globalThis as any).ENV.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
@@ -2536,7 +2536,7 @@ bot.callbackQuery("test_kick", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Kick</b> Job... (Wait)", { parse_mode: "HTML" });
 
-    if (process.env.VERCEL) {
+    if ((globalThis as any).ENV.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
@@ -2790,7 +2790,7 @@ bot.command("testkick", async (ctx) => {
 
     await ctx.reply("🤖 Menjalankan Auto-Kick Script... (Mohon tunggu)");
 
-    if (process.env.VERCEL) {
+    if ((globalThis as any).ENV.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
@@ -2967,7 +2967,7 @@ bot.on("message:document", async (ctx) => {
 
         try {
             const file = await ctx.api.getFile(ctx.message.document.file_id);
-            const url = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
 
             // Download
             const response = await (await fetch(url)).arrayBuffer();
