@@ -44,8 +44,8 @@ bot.command("pingver", async (ctx) => {
 // ============================================================
 
 // Cek apakah user Admin
-const ADMIN_ID = parseInt((globalThis as any).ENV.ADMIN_ID || "0");
-const isAdmin = (id: number) => id === ADMIN_ID;
+const getAdminId = () => parseInt((globalThis as any).ENV?.ADMIN_ID || "0");
+const isAdmin = (id: number) => id === getAdminId();
 
 // ============================================================
 // KEYBOARDS (ANTARMUKA)
@@ -259,7 +259,7 @@ void safeSetMyCommands([
 ], { scope: { type: "default" } });
 
 // 2. Special commands for Admin ID
-if (ADMIN_ID) {
+if (getAdminId()) {
     void safeSetMyCommands([
         { command: "admin", description: "👮 Panel Admin" },
         { command: "tesexp", description: "🧪 Test Expire (Debug)" },
@@ -268,7 +268,7 @@ if (ADMIN_ID) {
         { command: "set_cookie", description: "🍪 Set Cookie" },
         { command: "set_channels", description: "📢 Set Channels" },
         { command: "start", description: "Mulai Bot / Restart" },
-    ], { scope: { type: "chat", chat_id: ADMIN_ID } });
+    ], { scope: { type: "chat", chat_id: getAdminId() } });
 }
 
 // Handler: 📖 Panduan

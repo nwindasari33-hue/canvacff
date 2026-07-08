@@ -10,10 +10,10 @@ const getDb = () => {
         throw new Error("TURSO_DATABASE_URL tidak ditemukan di environment variables (Global ENV belum di-set)");
     }
 
-    _dbClient = createClient({
-        url: env.TURSO_DATABASE_URL.replace("libsql://", "https://"),
-        authToken: env.TURSO_AUTH_TOKEN,
-    });
+    // @libsql/client/web requires https:// not libsql://
+    const rawUrl = env.TURSO_DATABASE_URL as string;
+    const url = rawUrl.startsWith("libsql://") ? rawUrl.replace("libsql://", "https://") : rawUrl;
+    _dbClient = createClient({ url, authToken: env.TURSO_AUTH_TOKEN });
     return _dbClient;
 };
 

@@ -7,9 +7,8 @@ export interface Env {
     TURSO_AUTH_TOKEN: string;
     ADMIN_ID: string;
     GITHUB_PAT: string;
-    GITHUB_OWNER: string;
+    GITHUB_USERNAME: string;
     GITHUB_REPO: string;
-    // Add any other env vars here
 }
 
 export default {
@@ -32,7 +31,7 @@ export default {
         // Manual Trigger for Cron Actions (for testing)
         if (url.pathname === "/api/cron-trigger") {
             const eventType = url.searchParams.get("event") || "process_queue";
-            if (!env.GITHUB_PAT || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
+            if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
                 return new Response("Missing GitHub Secrets", { status: 500 });
             }
             try {
@@ -53,7 +52,7 @@ export default {
         initBot(env.BOT_TOKEN);
 
 
-        if (!env.GITHUB_PAT || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
+        if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
             console.error("Missing GitHub Secrets in Cloudflare Worker environment.");
             return;
         }
@@ -86,7 +85,7 @@ export default {
  * Sends a repository_dispatch event to GitHub API
  */
 async function triggerGithubAction(env: Env, eventType: string): Promise<Response> {
-    const apiUrl = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/dispatches`;
+    const apiUrl = `https://api.github.com/repos/${env.GITHUB_USERNAME}/${env.GITHUB_REPO}/dispatches`;
 
     return await fetch(apiUrl, {
         method: "POST",
