@@ -4,8 +4,8 @@ import dotenv from "dotenv";
 // Memuat variabel lingkungan dari file .env
 dotenv.config();
 
-const url = (globalThis as any).ENV.;
-const authToken = (globalThis as any).ENV.;
+const url = (globalThis as any).ENV.TURSO_DATABASE_URL;
+const authToken = (globalThis as any).ENV.TURSO_AUTH_TOKEN;
 
 if (!url) {
     throw new Error("TURSO_DATABASE_URL tidak ditemukan di environment variables");
