@@ -21,8 +21,8 @@ export default {
 
         // Handle Telegram Webhook
         if (url.pathname === "/api/webhook") {
-            const handleUpdate = webhookCallback(bot, "cloudflare-worker");
-            return handleUpdate(request);
+            const handleUpdate = webhookCallback(bot, "cloudflare");
+            return (handleUpdate as any)(request);
         }
 
         // Manual Trigger for Cron Actions (for testing)

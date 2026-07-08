@@ -650,33 +650,38 @@ bot.callbackQuery("check_join", async (ctx) => {
 
 // Helper: Trigger GitHub Action
 async function triggerGithubAction(eventType: string = "process_queue"): Promise<{ success: boolean; message: string }> {
-    const ghUser = process.env.GITHUB_USERNAME;
-    const ghRepo = process.env.GITHUB_REPO;
-    const ghToken = process.env.GITHUB_TOKEN;
+    const env = (globalThis as any).ENV;
+    const ghUser = env.GITHUB_USERNAME;
+    const ghRepo = env.GITHUB_REPO;
+    const ghToken = env.GITHUB_TOKEN || env.GITHUB_PAT;
 
     if (!ghUser || !ghRepo || !ghToken) {
-        const msg = "⚠️ GITHUB_USERNAME, GITHUB_REPO, atau GITHUB_TOKEN belum diatur di env/Vercel!";
+        const msg = "⚠️ GITHUB_USERNAME, GITHUB_REPO, atau GITHUB_TOKEN belum diatur di env!";
         console.warn(msg);
         return { success: false, message: msg };
     }
 
     try {
-        await axios.post(
-            `https://api.github.com/repos/${ghUser}/${ghRepo}/dispatches`,
-            { event_type: eventType },
-            {
-                headers: {
-                    Authorization: `Bearer ${ghToken}`,
-                    Accept: "application/vnd.github.v3+json",
-                },
-            }
-        );
-        console.log("🚀 GitHub Action triggered successfully.");
-        return { success: true, message: "GitHub Actions workflow berhasil dipicu!" };
+        const res = await fetch(`https://api.github.com/repos/${ghUser}/${ghRepo}/dispatches`, {
+            method: "POST",
+            headers: {
+                "Accept": "application/vnd.github.v3+json",
+                "Authorization": `Bearer ${ghToken}`,
+                "User-Agent": "Cloudflare-Worker-Cron-Bot",
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ event_type: eventType }),
+        });
+        if (res.ok) {
+            console.log("🚀 GitHub Action triggered successfully.");
+            return { success: true, message: "GitHub Actions workflow berhasil dipicu!" };
+        } else {
+            const details = await res.text();
+            console.error("❌ Failed to trigger GitHub Action:", details);
+            return { success: false, message: `Gagal memicu GitHub Action: ${details}` };
+        }
     } catch (e: any) {
-        const details = e.response?.data?.message || e.message;
-        console.error("❌ Failed to trigger GitHub Action:", details);
-        return { success: false, message: `Gagal memicu GitHub Action: ${details}` };
+        return { success: false, message: `Error: ${e.message}` };
     }
 }
 
@@ -697,7 +702,7 @@ bot.command("test_invite", async (ctx) => {
         );
 
         // 2. Trigger GitHub Action
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
 
         await ctx.reply(
             `✅ <b>Masuk Antrian!</b>\n\n` +
@@ -1970,7 +1975,7 @@ bot.command("tesexp", async (ctx) => {
         }
 
         // Trigger GitHub Action
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
 
         await ctx.reply(
             `🧪 <b>Test Expire Set!</b>\n\n` +
@@ -2228,8 +2233,7 @@ bot.command("addaccount", async (ctx) => {
 
                 // Download Content
                 const response = await (await fetch(downloadUrl)).arrayBuffer();
-                const buffer = Buffer.from(response.data);
-                const content = buffer.toString('utf-8').trim();
+                const content = new TextDecoder("utf-8").decode(response).trim();
 
                 if (isJsonFile) {
                     try {
@@ -2328,7 +2332,7 @@ bot.on("message:document", async (ctx) => {
             const downloadUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
             const response = await (await fetch(downloadUrl)).arrayBuffer();
-            const content = Buffer.from(response.data).toString('utf-8');
+            const content = new TextDecoder('utf-8').decode(response);
 
             // Validate JSON
             try {
@@ -2367,7 +2371,7 @@ bot.on("message:document", async (ctx) => {
 
             // Download
             const response = await (await fetch(url)).arrayBuffer();
-            const content = Buffer.from(response.data).toString('utf-8');
+            const content = new TextDecoder('utf-8').decode(response);
 
             await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, "⚙️ <b>Restoring Data...</b> (Do not touch)", { parse_mode: "HTML" });
 
@@ -2518,11 +2522,11 @@ bot.callbackQuery("test_invite", async (ctx) => {
 
     if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
-        triggerGithubAction((globalThis as any).ENV, "process_queue").catch(e => console.error("Dispatch error", e));
+        triggerGithubAction("process_queue").catch(e => console.error("Dispatch error", e));
         return ctx.reply("🚀 GitHub Action 'process-queue' dipicu.");
     }
     await ctx.answerCallbackQuery();
@@ -2534,11 +2538,11 @@ bot.callbackQuery("test_kick", async (ctx) => {
 
     if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        triggerGithubAction((globalThis as any).ENV, "manual_sync").catch(e => console.error("Dispatch error", e));
+        triggerGithubAction("manual_sync").catch(e => console.error("Dispatch error", e));
         return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
     }
     await ctx.answerCallbackQuery();
@@ -2772,7 +2776,7 @@ bot.command("forceexpire", async (ctx) => {
         }
 
         // Trigger GitHub Action
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
 
         await ctx.reply(`✅ Semua akun/sub dengan email <b>${email}</b> telah diatur EXPIRED (2 menit).\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
     } catch (e: any) {
@@ -2788,11 +2792,11 @@ bot.command("testkick", async (ctx) => {
 
     if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
-        const trigger = await triggerGithubAction();
+        const trigger = await triggerGithubAction((globalThis as any).ENV);
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        triggerGithubAction((globalThis as any).ENV, "manual_sync").catch(e => console.error("Dispatch error", e));
+        triggerGithubAction("manual_sync").catch(e => console.error("Dispatch error", e));
         return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
     }
 });
@@ -2967,7 +2971,7 @@ bot.on("message:document", async (ctx) => {
 
             // Download
             const response = await (await fetch(url)).arrayBuffer();
-            const content = Buffer.from(response.data).toString('utf-8');
+            const content = new TextDecoder('utf-8').decode(response);
 
             // Restore via Service
             // Note: In Serverless, we process immediately.
