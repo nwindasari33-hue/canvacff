@@ -1,8 +1,4 @@
-import { createClient } from "@libsql/client";
-import dotenv from "dotenv";
-
-// Memuat variabel lingkungan dari file .env
-dotenv.config();
+import { createClient } from "@libsql/client/web";
 
 const url = (globalThis as any).ENV.TURSO_DATABASE_URL;
 const authToken = (globalThis as any).ENV.TURSO_AUTH_TOKEN;

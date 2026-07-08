@@ -1,18 +1,18 @@
 import { Bot, Context, InlineKeyboard, Keyboard, InputFile, GrammyError, HttpError } from "grammy";
 import { sql } from "../lib/db";
-import { inviteUser, checkSlots, getAccountInfo } from "../lib/canva";
-import dotenv from "dotenv";
-import axios from "axios";
-import { exec } from "child_process";
+
+
+
+
 import { TimeUtils } from "./lib/time";
 import { BackupService } from "./lib/backup";
 
-dotenv.config();
+
 
 // Definisi Tipe Context Custom (jika perlu)
 type MyContext = Context;
 
-const token = (globalThis as any).ENV.BOT_TOKEN;
+const token = process.env.BOT_TOKEN;
 if (!token) throw new Error("BOT_TOKEN hilang!");
 
 export const bot = new Bot<MyContext>(token);
@@ -44,7 +44,7 @@ bot.command("pingver", async (ctx) => {
 // ============================================================
 
 // Cek apakah user Admin
-const ADMIN_ID = parseInt((globalThis as any).ENV.ADMIN_ID || "0");
+const ADMIN_ID = parseInt(process.env.ADMIN_ID || "0");
 const isAdmin = (id: number) => id === ADMIN_ID;
 
 // ============================================================
@@ -75,7 +75,7 @@ async function getForceSubChannels(): Promise<string[]> {
     }
 
     if (!raw) {
-        raw = (globalThis as any).ENV.FORCE_SUB_CHANNELS || "";
+        raw = process.env.FORCE_SUB_CHANNELS || "";
     }
 
     return raw.split(',').map(c => c.trim()).filter(c => c);
@@ -650,9 +650,9 @@ bot.callbackQuery("check_join", async (ctx) => {
 
 // Helper: Trigger GitHub Action
 async function triggerGithubAction(eventType: string = "process_queue"): Promise<{ success: boolean; message: string }> {
-    const ghUser = (globalThis as any).ENV.GITHUB_USERNAME;
-    const ghRepo = (globalThis as any).ENV.GITHUB_REPO;
-    const ghToken = (globalThis as any).ENV.GITHUB_TOKEN;
+    const ghUser = process.env.GITHUB_USERNAME;
+    const ghRepo = process.env.GITHUB_REPO;
+    const ghToken = process.env.GITHUB_TOKEN;
 
     if (!ghUser || !ghRepo || !ghToken) {
         const msg = "⚠️ GITHUB_USERNAME, GITHUB_REPO, atau GITHUB_TOKEN belum diatur di env/Vercel!";
@@ -1555,7 +1555,10 @@ const showAdminPanel = async (ctx: MyContext) => {
     if (!isAdmin(ctx.from?.id || 0)) return ctx.reply("⛔ Menu ini khusus Admin.");
 
     // Menu Admin
-    const slotInfo = await checkSlots();
+    
+    const tsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used FROM canva_accounts WHERE is_active=1");
+    const slotInfo = tsRes.rows.length > 0 ? `${tsRes.rows[0].used} / ${tsRes.rows[0].max} Terpakai` : "Tidak ada Node";
+
 
     // Ambil Team ID dari DB
     const teamRes = await sql("SELECT value FROM settings WHERE key = 'canva_team_id'");
@@ -1850,7 +1853,7 @@ bot.callbackQuery("adm_cookie", async (ctx) => {
 // Command: Debug Admin Status (Public)
 bot.command("debug", async (ctx) => {
     const userId = ctx.from?.id || 0;
-    const adminIdEnv = (globalThis as any).ENV.ADMIN_ID || "NOT SET";
+    const adminIdEnv = process.env.ADMIN_ID || "NOT SET";
     const isAdminUser = isAdmin(userId);
 
     await ctx.reply(
@@ -2159,7 +2162,7 @@ bot.command("addaccount", async (ctx) => {
         console.log(`[DEBUG] /addaccount triggered by ${ctx.from?.id}`);
 
         // 2. Auth Check with Detailed Feedback
-        const adminIdEnv = parseInt((globalThis as any).ENV.ADMIN_ID || "0");
+        const adminIdEnv = parseInt(process.env.ADMIN_ID || "0");
         const userId = ctx.from?.id || 0;
 
         if (userId !== adminIdEnv) {
@@ -2221,12 +2224,10 @@ bot.command("addaccount", async (ctx) => {
                 }
 
                 // Construct Download URL
-                const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${filePath}`;
+                const downloadUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${filePath}`;
 
                 // Download Content
-                const response = await axios.get(downloadUrl, {
-                    responseType: 'arraybuffer'
-                });
+                const response = await (await fetch(downloadUrl)).arrayBuffer();
                 const buffer = Buffer.from(response.data);
                 const content = buffer.toString('utf-8').trim();
 
@@ -2324,9 +2325,9 @@ bot.on("message:document", async (ctx) => {
 
             const doc = ctx.message.document;
             const file = await ctx.api.getFile(doc.file_id);
-            const downloadUrl = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
+            const downloadUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
-            const response = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
+            const response = await (await fetch(downloadUrl)).arrayBuffer();
             const content = Buffer.from(response.data).toString('utf-8');
 
             // Validate JSON
@@ -2362,10 +2363,10 @@ bot.on("message:document", async (ctx) => {
 
         try {
             const file = await ctx.api.getFile(ctx.message.document.file_id);
-            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
+            const url = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
             // Download
-            const response = await axios.get(url, { responseType: 'arraybuffer' });
+            const response = await (await fetch(url)).arrayBuffer();
             const content = Buffer.from(response.data).toString('utf-8');
 
             await ctx.api.editMessageText(ctx.chat.id, loadMsg.message_id, "⚙️ <b>Restoring Data...</b> (Do not touch)", { parse_mode: "HTML" });
@@ -2515,20 +2516,14 @@ bot.callbackQuery("test_invite", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
 
-    if ((globalThis as any).ENV.VERCEL) {
+    if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction();
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
-        exec("npm run process-queue", (error, stdout, stderr) => {
-            if (error) {
-                ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
-                return;
-            }
-            const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
-            ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
-        });
+        triggerGithubAction((globalThis as any).ENV, "process_queue").catch(e => console.error("Dispatch error", e));
+        return ctx.reply("🚀 GitHub Action 'process-queue' dipicu.");
     }
     await ctx.answerCallbackQuery();
 });
@@ -2537,20 +2532,14 @@ bot.callbackQuery("test_kick", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Kick</b> Job... (Wait)", { parse_mode: "HTML" });
 
-    if ((globalThis as any).ENV.VERCEL) {
+    if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction();
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        exec("npm run auto-kick", (error, stdout, stderr) => {
-            if (error) {
-                ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
-                return;
-            }
-            const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
-            ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
-        });
+        triggerGithubAction((globalThis as any).ENV, "manual_sync").catch(e => console.error("Dispatch error", e));
+        return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
     }
     await ctx.answerCallbackQuery();
 });
@@ -2797,19 +2786,14 @@ bot.command("testkick", async (ctx) => {
 
     await ctx.reply("🤖 Menjalankan Auto-Kick Script... (Mohon tunggu)");
 
-    if ((globalThis as any).ENV.VERCEL) {
+    if (process.env.VERCEL) {
         await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
         const trigger = await triggerGithubAction();
         await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
-        exec("npm run auto-kick", (error, stdout, stderr) => {
-            if (error) {
-                ctx.reply(`❌ Error: ${error.message}`);
-                return;
-            }
-            ctx.reply(`✅ Done:\n<pre>${stdout}</pre>`, { parse_mode: "HTML" });
-        });
+        triggerGithubAction((globalThis as any).ENV, "manual_sync").catch(e => console.error("Dispatch error", e));
+        return ctx.reply("🚀 GitHub Action 'manual_sync' dipicu.");
     }
 });
 
@@ -2979,10 +2963,10 @@ bot.on("message:document", async (ctx) => {
 
         try {
             const file = await ctx.api.getFile(ctx.message.document.file_id);
-            const url = `https://api.telegram.org/file/bot${(globalThis as any).ENV.BOT_TOKEN}/${file.file_path}`;
+            const url = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
             // Download
-            const response = await axios.get(url, { responseType: 'arraybuffer' });
+            const response = await (await fetch(url)).arrayBuffer();
             const content = Buffer.from(response.data).toString('utf-8');
 
             // Restore via Service
