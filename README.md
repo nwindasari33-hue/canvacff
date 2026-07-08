@@ -1,51 +1,61 @@
-# Canva Bot (Cloudflare Workers Edition)
+# CanvaCF - Serverless Telegram Bot (Cloudflare Workers + GitHub Actions)
 
-Repositori ini adalah versi otonom dari Bot Invite Canva yang berjalan 100% pada jaringan **Cloudflare Workers**. Fitur unggulan dari repositori ini adalah:
-1. **Kecepatan Tinggi (Edge Network):** Respons bot instan.
-2. **Cron Terintegrasi:** Tidak perlu GitHub Actions cron; jadwal *process queue* dan *auto kick* diurus secara internal oleh Cloudflare.
-3. **Anti Cold-Start:** Selalu hidup 24/7.
-4. **Hybrid Puppeteer:** Otot pekerja untuk mengontrol browser Canva tetap di-handle oleh GitHub Actions (via *repository_dispatch* yang dikirim dari Cloudflare).
+Repositori ini berisi kode sumber untuk Bot Telegram Undangan Canva yang sepenuhnya di-*deploy* secara *serverless* menggunakan **Cloudflare Workers** (sebagai penerima Webhook & Cron trigger yang sangat cepat) dan **GitHub Actions** (sebagai *worker* Puppeteer di balik layar).
 
-## 🚀 Panduan Deployment
+## Arsitektur
+1. **Cloudflare Workers**: Bertugas menerima pesan Telegram secara *real-time*, membalas pengguna instan, dan mencatat transaksi ke database Turso.
+2. **Turso (LibSQL)**: Database Edge yang cepat dan ringan.
+3. **GitHub Actions**: Dipicu (di-*trigger*) oleh Cloudflare Workers untuk menjalankan tugas-tugas berat yang tidak didukung Cloudflare (misalnya `Puppeteer` untuk *auto-invite* atau *auto-kick* dari situs Canva).
 
-### 1. Kloning & Persiapan
-Buka terminal dan ketik:
+---
+
+## 🚀 Cara Deploy
+
+### Langkah 1: Persiapan Database (Turso)
+1. Buat database gratis di [Turso](https://turso.tech).
+2. Dapatkan URL Database (contoh: `libsql://nama-db-anda.turso.io`) dan *Auth Token*.
+3. Buka file `.dev.vars` (buat jika belum ada) dan masukkan rahasia Anda:
+   ```env
+   TURSO_DATABASE_URL="libsql://..."
+   TURSO_AUTH_TOKEN="..."
+   BOT_TOKEN="token_bot_telegram_anda"
+   GITHUB_USERNAME="nwindasari33-hue"
+   GITHUB_REPO="canvacff"
+   GITHUB_PAT="token_github_personal_access_anda"
+   ```
+
+### Langkah 2: Konfigurasi Rahasia di Cloudflare
+Karena Cloudflare Workers tidak membaca `.env` biasa di lingkungan *production*, Anda wajib memasukkan rahasia (*secrets*) tersebut ke Cloudflare.
+Buka terminal dan jalankan (masukkan nilai satu per satu ketika diminta):
 ```bash
-git clone https://github.com/nwindasari33-hue/canvacff.git
-cd canvacff
-npm install
-```
-
-### 2. Konfigurasi Rahasia di Cloudflare
-Anda membutuhkan token dan URL untuk menjalankan bot ini. 
-Deploy script pertama kali (meskipun error karena kurang *secrets*):
-```bash
-npm run deploy
-```
-Atau Anda bisa menggunakan Wrangler CLI untuk menyuntikkan rahasia:
-```bash
-npx wrangler secret put BOT_TOKEN
 npx wrangler secret put TURSO_DATABASE_URL
 npx wrangler secret put TURSO_AUTH_TOKEN
-npx wrangler secret put ADMIN_ID
-npx wrangler secret put GITHUB_PAT
-npx wrangler secret put GITHUB_OWNER
+npx wrangler secret put BOT_TOKEN
+npx wrangler secret put GITHUB_USERNAME
 npx wrangler secret put GITHUB_REPO
+npx wrangler secret put GITHUB_PAT
 ```
-*(Catatan: GITHUB_OWNER isi dengan `nwindasari33-hue` dan GITHUB_REPO isi dengan `canvacff`)*.
 
-### 3. Mengatur Webhook Telegram
-Setelah *deploy* sukses, Anda akan mendapatkan URL Cloudflare (contoh: `https://canvacf.nwindasari.workers.dev`).
-Buka browser dan kunjungi link berikut (ubah bagian yang diapit tanda `<>`):
+### Langkah 3: Deploy ke Cloudflare Workers
+Jalankan perintah berikut untuk mengunggah kode ke Cloudflare:
+```bash
+npm install
+npm run deploy
 ```
-https://api.telegram.org/bot<BOT_TOKEN_ANDA>/setWebhook?url=https://<URL_CLOUDFLARE_ANDA>/api/webhook
+Jika berhasil, Anda akan mendapatkan URL seperti: `https://canvacf.canvaqwe.workers.dev`.
+
+### Langkah 4: Set Webhook Telegram
+Setelah mendapatkan URL Cloudflare, hubungkan Bot Telegram Anda dengan cara membuka tautan ini di browser Anda:
+```text
+https://api.telegram.org/bot<TOKEN_BOT_ANDA>/setWebhook?url=https://canvacf.canvaqwe.workers.dev/api/webhook
 ```
-Jika sukses, Telegram akan memberikan respons `{"ok":true,"result":true,"description":"Webhook was set"}`.
+*(Ganti `<TOKEN_BOT_ANDA>` dengan token bot yang asli)*.
+Jika di halaman browser muncul tulisan `"Webhook was set"`, artinya bot Anda sudah berhasil aktif dan *online* 24/7.
 
-### 4. Aktivasi GitHub Actions (Otot Pekerja)
-Bot Telegram kini aktif! Namun, untuk mengirim undangan Canva, Cloudflare membutuhkan GitHub Actions.
-1. Masuk ke GitHub Repository Anda (tab **Settings** -> **Secrets and variables** -> **Actions**).
-2. Tambahkan *Secrets* yang sama persis (TURSO_URL, BOT_TOKEN, dll) beserta Cookie Canva Anda.
-3. Cloudflare akan secara otomatis menembak (*trigger*) script Puppeteer di GitHub sesuai jadwal yang ada di `wrangler.toml`.
+### Langkah 5: Setup GitHub Actions (Untuk Puppeteer)
+1. Pergi ke Pengaturan Repositori GitHub Anda > **Settings** > **Secrets and variables** > **Actions**.
+2. Tambahkan *Repository secrets* yang dibutuhkan oleh *scripts* automasi Canva Anda (seperti cookie canva, turso url, dll yang mungkin Anda perlukan).
+3. Buat workflow `.github/workflows/process_queue.yml` (dan yang lainnya) yang bereaksi terhadap `repository_dispatch`. Cloudflare Workers akan memicu *workflow* ini dengan *event type* `"process_queue"` dan `"manual_sync"`.
 
-🎉 **Selesai! Sistem bot Canva Anda kini 100% berjalan autopilot di atas Cloudflare Workers!**
+## Selesai! 🎉
+Bot Anda sekarang berjalan 100% secara gratis tanpa server aktif (*serverless*). Cloudflare Workers akan langsung membangunkan GitHub Actions begitu ada tugas berat yang perlu diselesaikan.
