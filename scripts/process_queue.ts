@@ -522,10 +522,10 @@ async function runPuppeteerQueue() {
                     const startStr = TimeUtils.getWIBISOString();
 
                     if (activeSub.rows.length > 0) {
-                        await sql(`UPDATE subscriptions SET end_date = ?, product_id = ?, start_date = ? WHERE id = ?`, [endDateStr, prodId, startStr, activeSub.rows[0].id]);
+                        await sql(`UPDATE subscriptions SET end_date = ?, product_id = ?, start_date = ?, assigned_node_id = ? WHERE id = ?`, [endDateStr, prodId, startStr, acc.id, activeSub.rows[0].id]);
                     } else {
                         const subId = `sub_${Date.now()}_${userId}`;
-                        await sql(`INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, [subId, userId, prodId, startStr, endDateStr]);
+                        await sql(`INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status, assigned_node_id) VALUES (?, ?, ?, ?, ?, 'active', ?)`, [subId, userId, prodId, startStr, endDateStr, acc.id]);
                     }
 
                     if (userId > 0) {

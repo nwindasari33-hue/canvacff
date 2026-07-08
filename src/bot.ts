@@ -1085,8 +1085,8 @@ async function handleActivation(ctx: any, emailInput: string) {
         const subId = `sub_${Date.now()}_${userId}`;
 
         await sql(
-            `INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, 
-            [subId, userId, selectedProd, startStr, endDateStr]
+            `INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status, assigned_node_id) VALUES (?, ?, ?, ?, ?, 'active', ?)`, 
+            [subId, userId, selectedProd, startStr, endDateStr, assignedNodeId]
         );
 
         // Optimistically increment member count
@@ -2409,16 +2409,18 @@ bot.command("listaccounts", async (ctx) => {
             const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
             const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
             const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const plan = acc.plan ? acc.plan : "Pro";
             const team = acc.team_id ? `Team: ${acc.team_id}` : "";
 
-            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `<b>Node #${acc.id}</b> ${status} (Plan: <b>${plan}</b>)\n`;
             msg += `📧 ${info}\n`;
             msg += `👥 Slot: <b>${usage}</b>\n`;
             if (team) msg += `🆔 ${team}\n`;
             msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
 
-            // Add Delete Button
-            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+            // Add Edit & Delete Buttons
+            keyboard.text(`📝 Edit #${acc.id}`, `edit_node_${acc.id}`)
+                    .text(`🗑️ Hapus #${acc.id}`, `del_node_${acc.id}`).row();
         }
         msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
@@ -2451,15 +2453,17 @@ bot.callbackQuery(/del_node_(\d+)/, async (ctx) => {
             const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
             const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
             const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const plan = acc.plan ? acc.plan : "Pro";
             const team = acc.team_id ? `Team: ${acc.team_id}` : "";
 
-            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `<b>Node #${acc.id}</b> ${status} (Plan: <b>${plan}</b>)\n`;
             msg += `📧 ${info}\n`;
             msg += `👥 Slot: <b>${usage}</b>\n`;
             if (team) msg += `🆔 ${team}\n`;
             msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
 
-            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+            keyboard.text(`📝 Edit #${acc.id}`, `edit_node_${acc.id}`)
+                    .text(`🗑️ Hapus #${acc.id}`, `del_node_${acc.id}`).row();
         }
         msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
 
@@ -2467,6 +2471,27 @@ bot.callbackQuery(/del_node_(\d+)/, async (ctx) => {
 
     } catch (e: any) {
         await ctx.answerCallbackQuery({ text: `❌ Gagal: ${e.message}` });
+    }
+});
+
+// Action: Edit Node Button
+bot.callbackQuery(/edit_node_(\d+)/, async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const nodeId = ctx.match[1];
+    
+    try {
+        await sql("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [`admin_edit_node_${ctx.from.id}`, nodeId]);
+        await ctx.reply(
+            `📝 <b>Edit Node #${nodeId}</b>\n\n` +
+            `Silakan kirim email & plan baru untuk Node #${nodeId}.\n` +
+            `Format: <code>email@domain.com | Plan</code>\n` +
+            `Contoh: <code>canva@gmail.com | Pro</code> atau <code>canva@gmail.com | Edu</code>\n\n` +
+            `<i>Kirim teks biasa untuk memperbarui.</i>`,
+            { parse_mode: "HTML" }
+        );
+        await ctx.answerCallbackQuery();
+    } catch (e: any) {
+        await ctx.reply(`❌ Gagal mengaktifkan sesi edit: ${e.message}`);
     }
 });
 
@@ -2557,16 +2582,18 @@ bot.callbackQuery("adm_list_accounts", async (ctx) => {
             const status = acc.is_active ? "🟢 Aktif" : "🔴 Nonaktif";
             const usage = `${acc.member_count || 0}/${acc.max_slots || 0}`;
             const info = acc.email ? acc.email : "(Belum Terdeteksi)";
+            const plan = acc.plan ? acc.plan : "Pro";
             const team = acc.team_id ? `Team: ${acc.team_id}` : "";
 
-            msg += `<b>Node #${acc.id}</b> ${status}\n`;
+            msg += `<b>Node #${acc.id}</b> ${status} (Plan: <b>${plan}</b>)\n`;
             msg += `📧 ${info}\n`;
             msg += `👥 Slot: <b>${usage}</b>\n`;
             if (team) msg += `🆔 ${team}\n`;
             msg += `🕒 Last Used: ${acc.last_used || 'Never'}\n\n`;
 
-            // Add Delete Button
-            keyboard.text(`🗑️ Hapus Node #${acc.id}`, `del_node_${acc.id}`).row();
+            // Add Edit & Delete Buttons
+            keyboard.text(`📝 Edit #${acc.id}`, `edit_node_${acc.id}`)
+                    .text(`🗑️ Hapus #${acc.id}`, `del_node_${acc.id}`).row();
         }
 
         msg += `Gunakan <code>/addaccount</code> untuk tambah.`;
@@ -2687,6 +2714,30 @@ bot.on("message:text", async (ctx, next) => {
 
     // 1. Skip if it is a command
     if (text.startsWith("/")) return next();
+
+    // Intercept Admin Edit Node State
+    if (isAdmin(userId)) {
+        const editState = await sql("SELECT value FROM settings WHERE key = ?", [`admin_edit_node_${userId}`]);
+        if (editState.rows.length > 0 && editState.rows[0].value) {
+            const nodeId = editState.rows[0].value;
+            const parts = text.split("|").map(x => x.trim());
+            const email = parts[0];
+            const plan = parts[1] || "Pro";
+
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                return ctx.reply("❌ <b>Format Email Salah!</b>\nSilakan kirim email dengan format yang benar. Contoh: <code>canva@gmail.com | Pro</code>", { parse_mode: "HTML" });
+            }
+
+            try {
+                await sql("UPDATE canva_accounts SET email = ?, plan = ? WHERE id = ?", [email, plan, nodeId]);
+                await sql("DELETE FROM settings WHERE key = ?", [`admin_edit_node_${userId}`]);
+                return ctx.reply(`✅ <b>Node #${nodeId} Berhasil Diupdate!</b>\n📧 Email: <code>${email}</code>\n📦 Plan: <b>${plan}</b>`, { parse_mode: "HTML" });
+            } catch (e: any) {
+                return ctx.reply(`❌ Gagal update database: ${e.message}`);
+            }
+        }
+    }
 
     // 2. Basic Email Regex Check
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -2836,6 +2887,7 @@ bot.command("data", async (ctx) => {
                 u.status as user_status, 
                 u.referral_points,
                 u.joined_at,
+                u.assigned_node_id,
                 s.status as sub_status,
                 s.start_date,
                 s.end_date,
@@ -2852,7 +2904,6 @@ bot.command("data", async (ctx) => {
         }
 
         // 2. Format Header & Content
-        // 2. Format Header & Content
         const nowStr = TimeUtils.format(); // "DD:MM:YYYY HH:mm:ss WIB"
         const fileName = `data-${nowStr.replace(/[: ]/g, '-').replace('WIB', '').trim()}.txt`;
 
@@ -2861,7 +2912,7 @@ bot.command("data", async (ctx) => {
         content += `Total User: ${res.rows.length}\n`;
         content += `==========================================================================================================================================================================\n`;
         // Widen Date columns to 22 chars for "dd/mm/yyyy HH:mm:ss"
-        content += `ID         | USERNAME           | NAMA                 | EMAIL                            | PAKET           | EXPIRED (WIB)        | POIN  | JOIN DATE (WIB)      \n`;
+        content += `ID         | USERNAME           | NAMA                 | EMAIL                            | PAKET           | EXPIRED (WIB)        | POIN  | JOIN DATE (WIB)      | NODE\n`;
         content += `==========================================================================================================================================================================\n`;
 
         for (const row of res.rows) {
@@ -2889,7 +2940,9 @@ bot.command("data", async (ctx) => {
                 joinDate = TimeUtils.format(utcJoin).replace(' WIB', '').padEnd(22);
             }
 
-            content += `${id} | ${username} | ${name} | ${email} | ${plan} | ${expDate} | ${points} | ${joinDate}\n`;
+            const nodeInfo = String(row.assigned_node_id !== null ? `#${row.assigned_node_id}` : "-").padEnd(6);
+
+            content += `${id} | ${username} | ${name} | ${email} | ${plan} | ${expDate} | ${points} | ${joinDate} | ${nodeInfo}\n`;
         }
 
         content += `==========================================================================================================================================================================\n`;
