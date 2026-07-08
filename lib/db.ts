@@ -65,7 +65,16 @@ export async function sql(query: string, args: any[] = []): Promise<any> {
         const obj: any = {};
         cols.forEach((col: any, i: number) => {
             const cell = row[i];
-            obj[col.name] = cell?.value ?? cell ?? null;
+            if (!cell || cell.type === "null") {
+                obj[col.name] = null;
+            } else if (cell.type === "integer" || cell.type === "float") {
+                const num = Number(cell.value);
+                obj[col.name] = Number.isSafeInteger(num) ? num : cell.value;
+            } else if (cell.type === "text") {
+                obj[col.name] = cell.value;
+            } else {
+                obj[col.name] = cell.value ?? cell;
+            }
         });
         return obj;
     });
