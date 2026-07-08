@@ -6,7 +6,7 @@ let _dbToken: string | null = null;
 
 function getConfig() {
     if (_dbUrl) return { url: _dbUrl!, token: _dbToken! };
-    const env = (globalThis as any).ENV;
+    const env = (globalThis as any).ENV || process.env;
     if (!env?.TURSO_DATABASE_URL) throw new Error("TURSO_DATABASE_URL tidak ditemukan di ENV");
     // Turso HTTP API requires https://, not libsql://
     _dbUrl = (env.TURSO_DATABASE_URL as string).replace("libsql://", "https://");
