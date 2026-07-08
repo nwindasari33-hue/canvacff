@@ -1,54 +1,79 @@
-import { createClient } from "@libsql/client/web";
+// Turso HTTP API client — no library, pure fetch
+// Works 100% in Cloudflare Workers
 
-let _dbClient: any = null;
+let _dbUrl: string | null = null;
+let _dbToken: string | null = null;
 
-const getDb = () => {
-    if (_dbClient) return _dbClient;
-
+function getConfig() {
+    if (_dbUrl) return { url: _dbUrl!, token: _dbToken! };
     const env = (globalThis as any).ENV;
-    if (!env || !env.TURSO_DATABASE_URL) {
-        throw new Error("TURSO_DATABASE_URL tidak ditemukan di environment variables (Global ENV belum di-set)");
+    if (!env?.TURSO_DATABASE_URL) throw new Error("TURSO_DATABASE_URL tidak ditemukan di ENV");
+    // Turso HTTP API requires https://, not libsql://
+    _dbUrl = (env.TURSO_DATABASE_URL as string).replace("libsql://", "https://");
+    _dbToken = env.TURSO_AUTH_TOKEN as string;
+    return { url: _dbUrl!, token: _dbToken! };
+}
+
+export async function sql(query: string, args: any[] = []): Promise<any> {
+    const { url, token } = getConfig();
+
+    // Convert positional args to Turso's named format
+    const stmts = [{
+        q: query,
+        params: args.map((v) => {
+            if (v === null || v === undefined) return { type: "null" };
+            if (typeof v === "number") return { type: "integer", value: String(v) };
+            return { type: "text", value: String(v) };
+        }),
+    }];
+
+    const res = await fetch(`${url}/v2/pipeline`, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            requests: [
+                { type: "execute", stmt: { sql: query, args: args.map((v) => {
+                    if (v === null || v === undefined) return { type: "null" };
+                    if (typeof v === "number") return { type: "integer", value: String(v) };
+                    return { type: "text", value: String(v) };
+                }) } },
+                { type: "close" },
+            ],
+        }),
+    });
+
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Turso HTTP error ${res.status}: ${text}`);
     }
 
-    // @libsql/client/web requires https:// not libsql://
-    const rawUrl = env.TURSO_DATABASE_URL as string;
-    const url = rawUrl.startsWith("libsql://") ? rawUrl.replace("libsql://", "https://") : rawUrl;
-    _dbClient = createClient({ url, authToken: env.TURSO_AUTH_TOKEN });
-    return _dbClient;
-};
+    const data = await res.json() as any;
+    const result = data.results?.[0];
 
-// Export db proxy in case it's used directly
-export const db = new Proxy({}, {
-    get: (target, prop) => {
-        return getDb()[prop];
+    if (result?.type === "error") {
+        throw new Error(`Turso query error: ${result.error?.message}`);
     }
-}) as any;
 
-// Fungsi bantuan untuk menjalankan query SQL standar
-export const sql = async (query: string, args: any[] = []) => {
-    let attempts = 0;
-    const maxRetries = 3;
+    const cols = result?.response?.result?.cols ?? [];
+    const rows_raw = result?.response?.result?.rows ?? [];
 
-    while (attempts < maxRetries) {
-        attempts++;
-        try {
-            const result = await getDb().execute({ sql: query, args });
-            return result;
-        } catch (error: any) {
-            // Only retry on network/fetch errors
-            if (attempts < maxRetries && (
-                error.message?.includes("fetch failed") ||
-                error.message?.includes("ConnectTimeoutError") ||
-                error.code === "UND_ERR_CONNECT_TIMEOUT"
-            )) {
-                console.warn(`⚠️ DB Retry ${attempts}/${maxRetries} due to network error...`);
-                await new Promise(r => setTimeout(r, 1500)); // Wait 1.5s
-                continue;
-            }
+    // Convert to array-of-objects like libsql returns
+    const rows = rows_raw.map((row: any[]) => {
+        const obj: any = {};
+        cols.forEach((col: any, i: number) => {
+            const cell = row[i];
+            obj[col.name] = cell?.value ?? cell ?? null;
+        });
+        return obj;
+    });
 
-            console.error("Database Error:", error);
-            throw error;
-        }
-    }
-    throw new Error("DB Connection Failed after retries");
-};
+    return { rows, columns: cols.map((c: any) => c.name) };
+}
+
+// Proxy for direct db.execute() calls in bot.ts
+export const db = {
+    execute: (opts: { sql: string; args?: any[] }) => sql(opts.sql, opts.args ?? []),
+} as any;
