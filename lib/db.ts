@@ -11,7 +11,7 @@ const getDb = () => {
     }
 
     _dbClient = createClient({
-        url: env.TURSO_DATABASE_URL,
+        url: env.TURSO_DATABASE_URL.replace("libsql://", "https://"),
         authToken: env.TURSO_AUTH_TOKEN,
     });
     return _dbClient;
