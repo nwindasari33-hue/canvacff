@@ -16,6 +16,7 @@ export default {
         // Polyfill ENV globally for bot.ts and db.ts
         
         (globalThis as any).ENV = env;
+        (globalThis as any).CF_CTX = ctx;
         if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in env!");
         initBot(env.BOT_TOKEN);
 

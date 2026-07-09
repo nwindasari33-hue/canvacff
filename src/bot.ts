@@ -1195,38 +1195,73 @@ bot.command("broadcast", async (ctx) => {
 
         const statusMsg = await ctx.reply(`⏳ <b>Memulai Broadcast ke ${totalUsers} user...</b>`, { parse_mode: "HTML" });
 
-        let success = 0;
-        let blocked = 0;
-        let failed = 0;
+        // Extract context data safely before background task
+        const api = ctx.api;
+        const chatId = ctx.chat.id;
+        const replyMessageId = replyMsg?.message_id;
+        const messageText = message as string;
+        const statusMessageId = statusMsg.message_id;
 
-        for (const user of users.rows) {
-            try {
-                if (replyMsg) {
-                    await ctx.api.copyMessage(user.id as number, ctx.chat.id, replyMsg.message_id);
-                } else {
-                    await ctx.api.sendMessage(user.id as number, message as string);
-                }
-                success++;
-            } catch (e: any) {
-                if (e.description?.includes("blocked")) {
-                    blocked++;
-                } else {
-                    failed++;
-                }
+        const runBroadcast = async () => {
+            let success = 0;
+            let blocked = 0;
+            let failed = 0;
+
+            console.log(`[BROADCAST] Starting background broadcast to ${users.rows.length} users.`);
+
+            const chunkSize = 3;
+            for (let i = 0; i < users.rows.length; i += chunkSize) {
+                const chunk = users.rows.slice(i, i + chunkSize);
+                console.log(`[BROADCAST] Processing chunk ${i / chunkSize + 1}/${Math.ceil(users.rows.length / chunkSize)}`);
+                await Promise.all(chunk.map(async (user) => {
+                    if (!user.id) {
+                        failed++;
+                        return;
+                    }
+                    try {
+                        if (replyMessageId !== undefined) {
+                            await api.copyMessage(Number(user.id), chatId, replyMessageId);
+                        } else {
+                            await api.sendMessage(Number(user.id), messageText);
+                        }
+                        success++;
+                    } catch (e: any) {
+                        console.error(`[BROADCAST] Failed to send to ${user.id}:`, e.message || e);
+                        if (e.description?.includes("blocked") || e.description?.includes("deactivated")) {
+                            blocked++;
+                        } else {
+                            failed++;
+                        }
+                    }
+                }));
+                // Anti-flood: 100ms delay between chunks (approx 30 msg/sec)
+                await new Promise(r => setTimeout(r, 100));
             }
-            // Anti-Flood: Delay 30ms (Max 30 msg/sec)
-            await new Promise(r => setTimeout(r, 50));
-        }
 
-        await ctx.api.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            `✅ <b>Broadcast Selesai!</b>\n\n` +
-            `📨 Total Dikirim: <b>${success}</b>\n` +
-            `⛔ User Blokir: <b>${blocked}</b>\n` +
-            `❌ Gagal Lainnya: <b>${failed}</b>`,
-            { parse_mode: "HTML" }
-        );
+            console.log(`[BROADCAST] Finished. Success: ${success}, Blocked: ${blocked}, Failed: ${failed}`);
+
+            try {
+                await api.editMessageText(
+                    chatId,
+                    statusMessageId,
+                    `✅ <b>Broadcast Selesai!</b>\n\n` +
+                    `📨 Total Dikirim: <b>${success}</b>\n` +
+                    `⛔ User Blokir: <b>${blocked}</b>\n` +
+                    `❌ Gagal Lainnya: <b>${failed}</b>`,
+                    { parse_mode: "HTML" }
+                );
+            } catch (editError: any) {
+                console.error("[BROADCAST] Failed to edit final broadcast status message:", editError.message || editError);
+            }
+        };
+
+        const cfCtx = (globalThis as any).CF_CTX;
+        if (cfCtx && typeof cfCtx.waitUntil === "function") {
+            cfCtx.waitUntil(runBroadcast());
+        } else {
+            // Background run for non-Cloudflare environments (like local dev)
+            runBroadcast().catch(err => console.error("[BROADCAST] Local run error:", err));
+        }
 
     } catch (error: any) {
         await ctx.reply(`❌ Error System: ${error.message}`);
