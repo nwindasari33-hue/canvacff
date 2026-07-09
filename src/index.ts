@@ -1,5 +1,5 @@
 import { webhookCallback } from "grammy";
-import { bot, initBot } from "./bot";
+import { bot, initBot, processBroadcastBatch } from "./bot";
 
 export interface Env {
     BOT_TOKEN: string;
@@ -17,6 +17,7 @@ export default {
         
         (globalThis as any).ENV = env;
         (globalThis as any).CF_CTX = ctx;
+        (globalThis as any).CF_REQ_URL = request.url;
         if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in env!");
         initBot(env.BOT_TOKEN);
 
@@ -27,6 +28,14 @@ export default {
         if (url.pathname === "/api/webhook") {
             const handleUpdate = webhookCallback(bot, "cloudflare-mod");
             return (handleUpdate as any)(request);
+        }
+
+        // Handle Process Broadcast Queue Batch
+        if (url.pathname === "/api/process-broadcast") {
+            const broadcastId = Number(url.searchParams.get("id"));
+            if (!broadcastId) return new Response("Missing id", { status: 400 });
+            ctx.waitUntil(processBroadcastBatch(broadcastId));
+            return new Response("Processing batch started");
         }
 
         // Manual Trigger for Cron Actions (for testing)

@@ -1188,79 +1188,80 @@ bot.command("broadcast", async (ctx) => {
     }
 
     try {
+        // Ensure tables exist
+        await sql(`
+            CREATE TABLE IF NOT EXISTS broadcasts (
+                id INTEGER PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                status_message_id INTEGER NOT NULL,
+                total_users INTEGER NOT NULL,
+                success INTEGER DEFAULT 0,
+                blocked INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await sql(`
+            CREATE TABLE IF NOT EXISTS broadcast_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broadcast_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                message_text TEXT,
+                reply_message_id INTEGER
+            )
+        `);
+
         const users = await sql("SELECT id FROM users");
         const totalUsers = users.rows.length;
 
         if (totalUsers === 0) return ctx.reply("❌ Belum ada user di database.");
 
-        const statusMsg = await ctx.reply(`⏳ <b>Memulai Broadcast ke ${totalUsers} user...</b>`, { parse_mode: "HTML" });
+        const statusMsg = await ctx.reply(
+            `⏳ <b>Sedang Mengirim Broadcast...</b>\n\n` +
+            `📈 Progress: <b>0/${totalUsers}</b> user\n` +
+            `📨 Terkirim: <b>0</b>\n` +
+            `⛔ Blokir: <b>0</b>\n` +
+            `❌ Gagal: <b>0</b>`,
+            { parse_mode: "HTML" }
+        );
 
-        // Extract context data safely before background task
-        const api = ctx.api;
         const chatId = ctx.chat.id;
         const replyMessageId = replyMsg?.message_id;
         const messageText = message as string;
         const statusMessageId = statusMsg.message_id;
+        const broadcastId = Date.now();
 
-        const runBroadcast = async () => {
-            let success = 0;
-            let blocked = 0;
-            let failed = 0;
+        // 1. Insert broadcast tracker
+        await sql(
+            "INSERT INTO broadcasts (id, chat_id, status_message_id, total_users) VALUES (?, ?, ?, ?)",
+            [broadcastId, chatId, statusMessageId, totalUsers]
+        );
 
-            console.log(`[BROADCAST] Starting background broadcast to ${users.rows.length} users.`);
+        // 2. Insert all users into queue in one single fast query
+        await sql(
+            "INSERT INTO broadcast_queue (broadcast_id, user_id, message_text, reply_message_id) " +
+            "SELECT ?, id, ?, ? FROM users",
+            [broadcastId, messageText || null, replyMessageId !== undefined ? replyMessageId : null]
+        );
 
-            const chunkSize = 3;
-            for (let i = 0; i < users.rows.length; i += chunkSize) {
-                const chunk = users.rows.slice(i, i + chunkSize);
-                console.log(`[BROADCAST] Processing chunk ${i / chunkSize + 1}/${Math.ceil(users.rows.length / chunkSize)}`);
-                await Promise.all(chunk.map(async (user) => {
-                    if (!user.id) {
-                        failed++;
-                        return;
-                    }
-                    try {
-                        if (replyMessageId !== undefined) {
-                            await api.copyMessage(Number(user.id), chatId, replyMessageId);
-                        } else {
-                            await api.sendMessage(Number(user.id), messageText);
-                        }
-                        success++;
-                    } catch (e: any) {
-                        console.error(`[BROADCAST] Failed to send to ${user.id}:`, e.message || e);
-                        if (e.description?.includes("blocked") || e.description?.includes("deactivated")) {
-                            blocked++;
-                        } else {
-                            failed++;
-                        }
-                    }
-                }));
-                // Anti-flood: 100ms delay between chunks (approx 30 msg/sec)
-                await new Promise(r => setTimeout(r, 100));
-            }
+        // 3. Trigger first batch processing
+        const reqUrl = (globalThis as any).CF_REQ_URL || "https://canvacf.canvaqwe.workers.dev";
+        const urlObj = new URL(reqUrl);
+        const triggerUrl = `${urlObj.protocol}//${urlObj.host}/api/process-broadcast?id=${broadcastId}`;
 
-            console.log(`[BROADCAST] Finished. Success: ${success}, Blocked: ${blocked}, Failed: ${failed}`);
-
+        const triggerTask = async () => {
             try {
-                await api.editMessageText(
-                    chatId,
-                    statusMessageId,
-                    `✅ <b>Broadcast Selesai!</b>\n\n` +
-                    `📨 Total Dikirim: <b>${success}</b>\n` +
-                    `⛔ User Blokir: <b>${blocked}</b>\n` +
-                    `❌ Gagal Lainnya: <b>${failed}</b>`,
-                    { parse_mode: "HTML" }
-                );
-            } catch (editError: any) {
-                console.error("[BROADCAST] Failed to edit final broadcast status message:", editError.message || editError);
+                await fetch(triggerUrl);
+            } catch (err: any) {
+                console.error("[BROADCAST] Failed to trigger background fetch:", err.message || err);
             }
         };
 
         const cfCtx = (globalThis as any).CF_CTX;
         if (cfCtx && typeof cfCtx.waitUntil === "function") {
-            cfCtx.waitUntil(runBroadcast());
+            cfCtx.waitUntil(triggerTask());
         } else {
-            // Background run for non-Cloudflare environments (like local dev)
-            runBroadcast().catch(err => console.error("[BROADCAST] Local run error:", err));
+            triggerTask().catch(err => console.error("[BROADCAST] Local trigger error:", err));
         }
 
     } catch (error: any) {
@@ -3110,4 +3111,116 @@ bot.callbackQuery("adm_set_donasi", async (ctx) => {
     await ctx.answerCallbackQuery();
 });
 
+}
+
+// Helper Function: Process Broadcast Queue Batch (35 users per batch)
+export async function processBroadcastBatch(broadcastId: number): Promise<void> {
+    try {
+        const broadcastRes = await sql("SELECT * FROM broadcasts WHERE id = ?", [broadcastId]);
+        if (broadcastRes.rows.length === 0) {
+            console.error(`[BROADCAST] Broadcast ${broadcastId} not found in database.`);
+            return;
+        }
+        const broadcast = broadcastRes.rows[0];
+
+        // Fetch up to 35 users from the queue
+        const queueRes = await sql(
+            "SELECT * FROM broadcast_queue WHERE broadcast_id = ? LIMIT 35",
+            [broadcastId]
+        );
+
+        // If the queue is empty, finalize and cleanup
+        if (queueRes.rows.length === 0) {
+            console.log(`[BROADCAST] Queue empty for ${broadcastId}. Finalizing.`);
+            try {
+                await bot.api.editMessageText(
+                    Number(broadcast.chat_id),
+                    Number(broadcast.status_message_id),
+                    `✅ <b>Broadcast Selesai!</b>\n\n` +
+                    `📨 Total Dikirim: <b>${broadcast.success}</b>\n` +
+                    `⛔ User Blokir: <b>${broadcast.blocked}</b>\n` +
+                    `❌ Gagal Lainnya: <b>${broadcast.failed}</b>`,
+                    { parse_mode: "HTML" }
+                );
+            } catch (err: any) {
+                console.error("[BROADCAST] Final edit failed:", err.message || err);
+            }
+            await sql("DELETE FROM broadcasts WHERE id = ?", [broadcastId]);
+            return;
+        }
+
+        let success = 0;
+        let blocked = 0;
+        let failed = 0;
+
+        // Process this batch of users in parallel
+        await Promise.all(queueRes.rows.map(async (row: any) => {
+            try {
+                if (row.reply_message_id !== null && row.reply_message_id !== undefined) {
+                    await bot.api.copyMessage(Number(row.user_id), Number(broadcast.chat_id), Number(row.reply_message_id));
+                } else {
+                    await bot.api.sendMessage(Number(row.user_id), row.message_text);
+                }
+                success++;
+            } catch (e: any) {
+                console.error(`[BROADCAST] Error sending to ${row.user_id}:`, e.message || e);
+                if (e.description?.includes("blocked") || e.description?.includes("deactivated")) {
+                    blocked++;
+                } else {
+                    failed++;
+                }
+            }
+        }));
+
+        // Update stats in broadcasts tracker
+        await sql(
+            "UPDATE broadcasts SET success = success + ?, blocked = blocked + ?, failed = failed + ? WHERE id = ?",
+            [success, blocked, failed, broadcastId]
+        );
+
+        // Delete processed user IDs from queue
+        const processedIds = queueRes.rows.map((row: any) => row.id);
+        const placeholders = processedIds.map(() => "?").join(",");
+        await sql(`DELETE FROM broadcast_queue WHERE id IN (${placeholders})`, processedIds);
+
+        // Update Telegram progress message
+        const totalProcessed = Number(broadcast.success) + success + Number(broadcast.blocked) + blocked + Number(broadcast.failed) + failed;
+        try {
+            await bot.api.editMessageText(
+                Number(broadcast.chat_id),
+                Number(broadcast.status_message_id),
+                `⏳ <b>Sedang Mengirim Broadcast...</b>\n\n` +
+                `📈 Progress: <b>${totalProcessed}/${broadcast.total_users}</b> user\n` +
+                `📨 Terkirim: <b>${Number(broadcast.success) + success}</b>\n` +
+                `⛔ Blokir: <b>${Number(broadcast.blocked) + blocked}</b>\n` +
+                `❌ Gagal: <b>${Number(broadcast.failed) + failed}</b>`,
+                { parse_mode: "HTML" }
+            );
+        } catch (err: any) {
+            console.error("[BROADCAST] Progress edit failed:", err.message || err);
+        }
+
+        // Trigger next batch asynchronously
+        const reqUrl = (globalThis as any).CF_REQ_URL || "https://canvacf.canvaqwe.workers.dev";
+        const urlObj = new URL(reqUrl);
+        const nextTriggerUrl = `${urlObj.protocol}//${urlObj.host}/api/process-broadcast?id=${broadcastId}`;
+
+        const triggerNext = async () => {
+            try {
+                await fetch(nextTriggerUrl);
+            } catch (err: any) {
+                console.error("[BROADCAST] Trigger next failed:", err.message || err);
+            }
+        };
+
+        const cfCtx = (globalThis as any).CF_CTX;
+        if (cfCtx && typeof cfCtx.waitUntil === "function") {
+            cfCtx.waitUntil(triggerNext());
+        } else {
+            triggerNext().catch(err => console.error("[BROADCAST] Local trigger error:", err));
+        }
+
+    } catch (error: any) {
+        console.error(`[BROADCAST] Error in processBroadcastBatch:`, error.message || error);
+    }
 }
