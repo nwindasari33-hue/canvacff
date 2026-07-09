@@ -16,7 +16,7 @@ puppeteer.use(StealthPlugin());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || process.env.ADMIN_CHANNEL_ID || '';
 
 // Chrome Path Logic
 const findChromeParams = [
