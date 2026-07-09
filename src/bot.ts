@@ -276,33 +276,36 @@ bot.hears("📖 Panduan", async (ctx) => {
     const isAdm = isAdmin(ctx.from?.id || 0);
 
     let msg = `📖 <b>PANDUAN LENGKAP BOT</b>\n\n` +
-        `<b>👤 Perintah User:</b>\n` +
+        `👤 <b>Perintah User:</b>\n` +
         `• <b>/start</b> - Mulai ulang bot & cek menu.\n` +
         `• <b>/aktivasi [email]</b> - Aktivasi Canva Pro (setelah pilih paket).\n` +
         `  Contoh: <code>/aktivasi user@gmail.com</code>\n` +
-        `• <b>🎁 Menu Paket</b> - Pilih durasi (1 Bulan Free / 6 Bulan Premium).\n` +
+        `• <b>🎁 Menu Paket</b> - Pilih durasi paket.\n` +
         `• <b>👤 Profil Saya</b> - Cek status langganan & poin referral.\n` +
-        `• <b>📊 Cek Slot</b> - Cek ketersediaan slot tim.\n\n` +
+        `• <b>📊 Cek Slot</b> - Cek ketersediaan slot tim.\n` +
+        `• <b>💸 Donasi</b> - Tampilkan info donasi bot.\n\n` +
         `ℹ️ <b>Tips:</b>\n` +
         `1. Join channel wajib agar bot bisa digunakan.\n` +
         `2. Undang teman untuk dapat poin (1 teman = 1 poin).\n` +
-        `3. Paket 6 Bulan butuh 6 Poin.\n\n`;
+        `3. Paket Premium membutuhkan Poin Referral.\n\n`;
 
     if (isAdm) {
-        msg += `<b>👮 Perintah Admin:</b>\n` +
-            `• <b>/admin</b> - Buka panel admin super.\n` +
-            `• <b>/data</b> - Export laporan user (.txt).\n` +
-            `• <b>/addpoint [ID|Poin]</b> - Tambah poin referral manual.\n` +
-            `• <b>/set_cookie [json]</b> - Set cookie Canva baru.\n` +
-            `• <b>/setua [ua]</b> - Set User-Agent browser.\n` +
-            `• <b>/cekcookie</b> - Cek isi cookie aktif di DB.\n` +
-            `• <b>/test_invite [email]</b> - Tes invite manual.\n` +
-            `• <b>/broadcast [pesan]</b> - Kirim pesan ke semua user.\n` +
-            `• <b>/delete_user [email/id]</b> - Hapus user permanent.\n` +
+        msg += `<b>👮 Perintah Admin (Owner):</b>\n` +
+            `• <b>/admin</b> - Buka Panel Admin Super.\n` +
+            `• <b>/addaccount</b> - Tambah Akun Canva (Upload JSON/Caption).\n` +
+            `• <b>/listaccounts</b> - List semua node Canva aktif.\n` +
+            `• <b>/deleteaccount [ID]</b> - Hapus node Canva manual.\n` +
+            `• <b>/addpoint [ID|Poin]</b> - Tambah poin referral user manual.\n` +
+            `• <b>/setdonasi [URL]</b> - Set link donasi bot.\n` +
+            `• <b>/broadcast [pesan]</b> - Broadcast ke seluruh user (antrian GHA).\n` +
+            `• <b>/setua [User-Agent]</b> - Set User-Agent browser Puppeteer.\n` +
+            `• <b>/delete_user [email/id]</b> - Hapus user permanent dari DB.\n` +
             `• <b>/reset_email [email]</b> - Soft delete (Hapus langganan saja).\n` +
-            `• <b>/forceexpire [email]</b> - Buat user expired (H-1).\n` +
-            `• <b>/set_channels</b> - Atur channel force subscribe.\n` +
-            `• <b>/channels</b> - Cek list channel aktif.\n`;
+            `• <b>/forceexpire [email]</b> - Paksa user expired (Tes Auto-Kick).\n` +
+            `• <b>/set_channels</b> - Atur channel force subscribe wajib.\n` +
+            `• <b>/channels</b> - Cek list channel wajib subs aktif.\n` +
+            `• <b>/data</b> - Export backup laporan data user (.txt).\n` +
+            `• <b>/uploaddb</b> - Restore database (Upload file backup JSON).\n`;
     }
 
     await ctx.reply(msg, { parse_mode: "HTML" });
@@ -1541,40 +1544,7 @@ bot.hears("👤 Profil Saya", async (ctx) => {
     );
 });
 
-// 4. Panduan (Help)
-bot.hears("📖 Panduan", async (ctx) => {
-    await ctx.reply(
-        `📖 <b>PANDUAN LENGKAP BOT V3</b>\n\n` +
-        `👤 <b>Perintah User:</b>\n` +
-        `• <b>/start</b> - Mulai ulang bot & cek menu.\n` +
-        `• <b>/aktivasi [email]</b> - Aktivasi Canva Pro.\n` +
-        `• <b>🎁 Menu Paket</b> - Beli paket (1 Bulan Free / 6 Bulan).\n` +
-        `• <b>👤 Profil Saya</b> - Cek status, poin, & link referral.\n` +
-        `• <b>📊 Cek Slot</b> - Cek sisa slot tim.\n` +
-        `• <b>📖 Panduan</b> - Tampilkan pesan ini.\n\n` +
-
-        `ℹ️ <b>Tips:</b>\n` +
-        `1. Wajib join channel agar bot bisa digunakan.\n` +
-        `2. Undang teman = 1 Poin (Bisa tukar paket).\n\n` +
-
-        `👮 <b>Perintah Admin (Owner):</b>\n` +
-        `• <b>/admin</b> - Buka Panel Admin Super (UI).\n` +
-        `• <b>/addaccount</b> - Tambah Akun Canva (Upload JSON/Caption).\n` +
-        `• <b>/listaccounts</b> - List semua node & tombol hapus.\n` +
-        `• <b>/addpoint [ID|Jml]</b> - Tambah poin user manual.\n` +
-        `• <b>/deleteaccount [ID]</b> - Hapus node canva manual.\n` +
-        `• <b>/delete_user [email/id]</b> - Hapus user permanen.\n` +
-        `• <b>/reset_email [email]</b> - Reset langganan (Soft Delete).\n` +
-        `• <b>/forceexpire [email]</b> - Paksa expired (Tes Auto-Kick).\n` +
-        `• <b>/broadcast [pesan]</b> - Broadcast ke semua user.\n` +
-        `• <b>/data</b> - Download backup data user (.txt).\n` +
-        `• <b>/addlogtopik</b> - Set notifikasi slot penuh di chat ini.\n` +
-        `• <b>/set_channels</b> - Atur channel wajib subs.\n` +
-        `• <b>/setua [text]</b> - Ganti User-Agent browser.\n` +
-        `• <b>/debug</b> - Cek status admin & ID.`,
-        { parse_mode: "HTML" }
-    );
-});
+// Duplicate hears("📖 Panduan") handler removed to avoid conflicts
 
 // Shared Admin Panel Logic
 const showAdminPanel = async (ctx: MyContext) => {
