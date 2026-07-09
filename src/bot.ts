@@ -1907,6 +1907,8 @@ bot.command("setua", async (ctx) => {
         ua = ctx.msg.reply_to_message.text || "";
     }
 
+    if (ua) ua = ua.trim();
+
     if (!ua) {
         return ctx.reply(
             `⚠️ <b>Format Salah!</b>\n\n` +
