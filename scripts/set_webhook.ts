@@ -1,7 +1,14 @@
-import { bot } from "../src/bot";
+import { bot, initBot } from "../src/bot";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+const token = process.env.BOT_TOKEN;
+if (!token) {
+    console.error("❌ BOT_TOKEN tidak ditemukan di .env");
+    process.exit(1);
+}
+initBot(token);
 
 const url = process.argv[2];
 
