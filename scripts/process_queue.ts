@@ -117,10 +117,116 @@ async function sendSystemLog(message: string) {
     }
 }
 
+async function copyTelegramMessage(chatId: string | number, fromChatId: string | number, messageId: number) {
+    if (!BOT_TOKEN) return false;
+    try {
+        const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/copyMessage`, {
+            chat_id: chatId,
+            from_chat_id: fromChatId,
+            message_id: messageId
+        });
+        return response.data.ok;
+    } catch (e: any) {
+        console.error("Failed to copy Telegram message:", e.message);
+        return false;
+    }
+}
+
+async function processBroadcasts() {
+    console.log("📢 Processing Broadcast Queue...");
+    try {
+        // Get all broadcasts
+        const broadcasts = await sql("SELECT * FROM broadcasts");
+        if (broadcasts.rows.length === 0) {
+            console.log("   No active broadcasts.");
+            return;
+        }
+
+        for (const broadcast of broadcasts.rows) {
+            console.log(`   Running Broadcast ID: ${broadcast.id}`);
+            const queue = await sql("SELECT * FROM broadcast_queue WHERE broadcast_id = ?", [broadcast.id]);
+            console.log(`   Found ${queue.rows.length} pending messages in queue.`);
+
+            let success = Number(broadcast.success || 0);
+            let blocked = Number(broadcast.blocked || 0);
+            let failed = Number(broadcast.failed || 0);
+            const total = Number(broadcast.total_users || 0);
+
+            let count = 0;
+            for (const item of queue.rows) {
+                let sent = false;
+                try {
+                    if (item.reply_message_id !== null && item.reply_message_id !== undefined) {
+                        sent = await copyTelegramMessage(Number(item.user_id), Number(broadcast.chat_id), Number(item.reply_message_id));
+                    } else {
+                        const msgId = await sendTelegram(Number(item.user_id), item.message_text);
+                        sent = !!msgId;
+                    }
+                    if (sent) {
+                        success++;
+                    } else {
+                        failed++;
+                    }
+                } catch (err: any) {
+                    console.error(`   Failed to send to user ${item.user_id}:`, err.message);
+                    if (err.response?.data?.description?.includes("blocked") || err.response?.data?.description?.includes("deactivated")) {
+                        blocked++;
+                    } else {
+                        failed++;
+                    }
+                }
+
+                // Delete from queue immediately
+                await sql("DELETE FROM broadcast_queue WHERE id = ?", [item.id]);
+
+                count++;
+                if (count % 15 === 0 || count === queue.rows.length) {
+                    await sql(
+                        "UPDATE broadcasts SET success = ?, blocked = ?, failed = ? WHERE id = ?",
+                        [success, blocked, failed, broadcast.id]
+                    );
+
+                    await editTelegramMessage(
+                        Number(broadcast.chat_id),
+                        Number(broadcast.status_message_id),
+                        `⏳ <b>Sedang Mengirim Broadcast...</b>\n\n` +
+                        `📈 Progress: <b>${success + blocked + failed}/${total}</b> user\n` +
+                        `📨 Terkirim: <b>${success}</b>\n` +
+                        `⛔ Blokir: <b>${blocked}</b>\n` +
+                        `❌ Gagal: <b>${failed}</b>`
+                    );
+                }
+
+                // Safe delay
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            // Finalize status message
+            await editTelegramMessage(
+                Number(broadcast.chat_id),
+                Number(broadcast.status_message_id),
+                `✅ <b>Broadcast Selesai!</b>\n\n` +
+                `📨 Total Dikirim: <b>${success}</b>\n` +
+                `⛔ User Blokir: <b>${blocked}</b>\n` +
+                `❌ Gagal Lainnya: <b>${failed}</b>`
+            );
+
+            // Cleanup database
+            await sql("DELETE FROM broadcasts WHERE id = ?", [broadcast.id]);
+            await sql("DELETE FROM broadcast_queue WHERE broadcast_id = ?", [broadcast.id]);
+        }
+    } catch (e: any) {
+        console.error("❌ Error processing broadcasts:", e.message);
+    }
+}
+
 async function runPuppeteerQueue() {
     console.log("🦾 Queue Processor Started...");
 
-    // 0. Process message deletions first
+    // 0. Process broadcasts first
+    await processBroadcasts();
+
+    // 0.1 Process message deletions
     await processMessageQueue();
 
     // 0.1 Update expired subscriptions status to 'expired'
