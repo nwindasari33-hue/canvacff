@@ -220,7 +220,7 @@ async function syncMemberCount() {
                 // Count
                 const counts = await page.evaluate(() => {
                     let pending = 0;
-                    const rows = Array.from(document.querySelectorAll('tbody tr'));
+                    const rows = Array.from(document.querySelectorAll('tbody tr, div[role="row"]'));
                     rows.forEach(r => {
                         const text = r.innerText.toLowerCase();
                         if (text.includes('invited') || text.includes('diundang') || text.includes('pending')) pending++;

@@ -525,7 +525,7 @@ async function runPuppeteerQueue() {
                     });
                     
                     try {
-                        await page.waitForSelector('input[placeholder="Enter email address..."]', { visible: true, timeout: 2500 });
+                        await page.waitForSelector('input[placeholder*="email" i]', { visible: true, timeout: 2500 });
                         opened = true;
                         break;
                     } catch {
@@ -548,17 +548,17 @@ async function runPuppeteerQueue() {
 
                 try {
                     await page.screenshot({ path: `${debugDir}/invite_1_modal_open_${ts}.png`, fullPage: false });
-                    await page.focus('input[placeholder="Enter email address..."]');
+                    await page.focus('input[placeholder*="email" i]');
                     await page.keyboard.down('Control');
                     await page.keyboard.press('KeyA');
                     await page.keyboard.up('Control');
                     await page.keyboard.press('Backspace');
-                    await page.type('input[placeholder="Enter email address..."]', email, { delay: 80 });
+                    await page.type('input[placeholder*="email" i]', email, { delay: 80 });
                     await randomDelay(800, 1200);
                     await page.screenshot({ path: `${debugDir}/invite_2_typed_${ts}.png`, fullPage: false });
                     await page.keyboard.press('Tab');
                     await randomDelay(500, 800);
-                    try { await page.focus('input[placeholder="Enter email address..."]'); } catch {}
+                    try { await page.focus('input[placeholder*="email" i]'); } catch {}
                     await page.keyboard.press('Enter');
                     await randomDelay(1500, 2000);
                     await page.screenshot({ path: `${debugDir}/invite_3_chip_${ts}.png`, fullPage: false });
@@ -593,7 +593,7 @@ async function runPuppeteerQueue() {
                         await page.screenshot({ path: `${debugDir}/invite_4_after_send_${ts}.png`, fullPage: false });
 
                         const modalClosed = await page.waitForSelector(
-                            'input[placeholder="Enter email address..."]',
+                            'input[placeholder*="email" i]',
                             { hidden: true, timeout: 8000 }
                         ).then(() => true).catch(() => false);
 
@@ -602,7 +602,7 @@ async function runPuppeteerQueue() {
                         if (modalClosed) {
                             await randomDelay(2000, 3000);
                             const postInviteCheck = await page.evaluate((targetEmail: string) => {
-                                const rows = Array.from(document.querySelectorAll('tbody tr'));
+                                const rows = Array.from(document.querySelectorAll('tbody tr, div[role="row"]'));
                                 const emailInTable = rows.some(row => (row.textContent || '').toLowerCase().includes(targetEmail.toLowerCase()));
                                 return { emailInTable };
                             }, email);
@@ -650,7 +650,7 @@ async function runPuppeteerQueue() {
                 }
 
                 await page.keyboard.press('Escape');
-                await page.waitForSelector('input[placeholder="Enter email address..."]', { hidden: true, timeout: 5000 }).catch(() => {});
+                await page.waitForSelector('input[placeholder*="email" i]', { hidden: true, timeout: 5000 }).catch(() => {});
                 await randomDelay(1500, 2500);
             }
 

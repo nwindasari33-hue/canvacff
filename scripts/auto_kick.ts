@@ -208,7 +208,7 @@ async function kickEnforcer() {
                     if (!match) return;
 
                     const email = match[0];
-                    if (safeSet.has(email) || text.includes('owner') || text.includes('administrator')) return;
+                    if (safeSet.has(email) || text.includes('owner') || text.includes('pemilik') || text.includes('admin') || text.includes('administrator')) return;
                     
                     // If in whitelist (active subscription/invite), skip kicking
                     if (whiteSet.has(email)) return;
@@ -268,7 +268,7 @@ async function kickEnforcer() {
                             const txtRaw = await btn.evaluate((e: any) => e.innerText);
                             const ariaLabel = await btn.evaluate((e: any) => e.getAttribute('aria-label')) || "";
 
-                            if ((txtRaw && txtRaw.toLowerCase().includes('remove')) || (ariaLabel && ariaLabel.toLowerCase().includes('remove'))) {
+                            if ((txtRaw && (txtRaw.toLowerCase().includes('remove') || txtRaw.toLowerCase().includes('hapus'))) || (ariaLabel && (ariaLabel.toLowerCase().includes('remove') || ariaLabel.toLowerCase().includes('hapus')))) {
                                 console.log(`   🖱️ Clicking Fallback Button: "${ariaLabel || txtRaw}"`);
                                 await btn.click();
                                 await randomDelay(1000, 2000);
