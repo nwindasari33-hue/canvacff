@@ -1,5 +1,6 @@
 import { webhookCallback } from "grammy";
 import { bot, initBot } from "./bot";
+import { sql } from "../lib/db";
 
 export interface Env {
     BOT_TOKEN: string;
@@ -37,6 +38,12 @@ export default {
                 return new Response("Missing GitHub Secrets", { status: 500 });
             }
             try {
+                if (eventType === "process_queue") {
+                    const hasWork = await hasPendingQueueWork();
+                    if (!hasWork) {
+                        return new Response("Triggered process_queue: skipped (no work)");
+                    }
+                }
                 const res = await triggerGithubAction(env, eventType);
                 return new Response(`Triggered ${eventType}: ${res.status}`);
             } catch (e: any) {
@@ -68,6 +75,15 @@ export default {
             eventType = "refresh-sessions";
         }
 
+        // Apply conditional optimization check for process_queue only
+        if (eventType === "process_queue") {
+            const hasWork = await hasPendingQueueWork();
+            if (!hasWork) {
+                console.log("[CRON] No pending work in queue. Skipping GitHub Action trigger.");
+                return;
+            }
+        }
+
         try {
             console.log(`Triggering GitHub Action: ${eventType}`);
             const res = await triggerGithubAction(env, eventType);
@@ -82,6 +98,45 @@ export default {
         }
     },
 };
+
+/**
+ * Checks if there is any pending work in the database that requires GHA to run.
+ */
+async function hasPendingQueueWork(): Promise<boolean> {
+    try {
+        // 1. Check pending invites
+        const inviteRes = await sql("SELECT 1 FROM users WHERE status = 'pending_invite' LIMIT 1");
+        if (inviteRes.rows && inviteRes.rows.length > 0) return true;
+
+        // 2. Check pending kicks (expired active subscriptions)
+        const expiredSubRes = await sql("SELECT 1 FROM subscriptions WHERE status = 'active' AND end_date < datetime('now', '+7 hours') LIMIT 1");
+        if (expiredSubRes.rows && expiredSubRes.rows.length > 0) return true;
+
+        // 3. Check pending kicks (users with assigned node but no active subscription)
+        const noSubRes = await sql(`
+            SELECT 1 FROM users u 
+            LEFT JOIN subscriptions s ON u.id = s.user_id AND s.status = 'active'
+            WHERE u.assigned_node_id IS NOT NULL 
+              AND s.id IS NULL 
+            LIMIT 1
+        `);
+        if (noSubRes.rows && noSubRes.rows.length > 0) return true;
+
+        // 4. Check active broadcasts
+        const broadcastRes = await sql("SELECT 1 FROM broadcasts LIMIT 1");
+        if (broadcastRes.rows && broadcastRes.rows.length > 0) return true;
+
+        // 5. Check pending message deletions
+        const msgQueueRes = await sql("SELECT 1 FROM message_queue WHERE delete_at < datetime('now', '+7 hours') LIMIT 1");
+        if (msgQueueRes.rows && msgQueueRes.rows.length > 0) return true;
+
+    } catch (e: any) {
+        console.error("[CRON] Error checking pending queue work:", e.message || e);
+        // Fallback to true on error so we don't block queue runs
+        return true;
+    }
+    return false;
+}
 
 /**
  * Sends a repository_dispatch event to GitHub API
