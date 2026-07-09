@@ -1,12 +1,15 @@
-import { webhookCallback } from "grammy";
+import { webhookCallback, InputFile } from "grammy";
 import { bot, initBot } from "./bot";
 import { sql } from "../lib/db";
+import { BackupService } from "./lib/backup";
 
 export interface Env {
     BOT_TOKEN: string;
     TURSO_DATABASE_URL: string;
     TURSO_AUTH_TOKEN: string;
     ADMIN_ID: string;
+    LOG_CHANNEL_ID?: string;
+    ADMIN_CHANNEL_ID?: string;
     GITHUB_PAT: string;
     GITHUB_USERNAME: string;
     GITHUB_REPO: string;
@@ -34,15 +37,22 @@ export default {
         // Manual Trigger for Cron Actions (for testing)
         if (url.pathname === "/api/cron-trigger") {
             const eventType = url.searchParams.get("event") || "process_queue";
-            if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
-                return new Response("Missing GitHub Secrets", { status: 500 });
-            }
             try {
                 if (eventType === "process_queue") {
+                    if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
+                        return new Response("Missing GitHub Secrets", { status: 500 });
+                    }
                     const hasWork = await hasPendingQueueWork();
                     if (!hasWork) {
                         return new Response("Triggered process_queue: skipped (no work)");
                     }
+                }
+                if (eventType === "auto_backup") {
+                    await runAutoBackup(env);
+                    return new Response("Triggered auto_backup: success");
+                }
+                if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
+                    return new Response("Missing GitHub Secrets", { status: 500 });
                 }
                 const res = await triggerGithubAction(env, eventType);
                 return new Response(`Triggered ${eventType}: ${res.status}`);
@@ -61,11 +71,6 @@ export default {
         initBot(env.BOT_TOKEN);
 
 
-        if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
-            console.error("Missing GitHub Secrets in Cloudflare Worker environment.");
-            return;
-        }
-
         const cron = event.cron;
         let eventType = "process_queue";
 
@@ -73,15 +78,32 @@ export default {
             eventType = "manual_sync";
         } else if (cron === "30 2 * * *") {
             eventType = "refresh-sessions";
+        } else if (cron === "0 */6 * * *") {
+            eventType = "auto_backup";
         }
 
         // Apply conditional optimization check for process_queue only
         if (eventType === "process_queue") {
+            if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
+                console.error("Missing GitHub Secrets in Cloudflare Worker environment.");
+                return;
+            }
             const hasWork = await hasPendingQueueWork();
             if (!hasWork) {
                 console.log("[CRON] No pending work in queue. Skipping GitHub Action trigger.");
                 return;
             }
+        }
+
+        // Handle auto backup locally in Cloudflare Worker (0 cost on GHA minutes)
+        if (eventType === "auto_backup") {
+            await runAutoBackup(env);
+            return;
+        }
+
+        if (!env.GITHUB_PAT || !env.GITHUB_USERNAME || !env.GITHUB_REPO) {
+            console.error("Missing GitHub Secrets in Cloudflare Worker environment.");
+            return;
         }
 
         try {
@@ -98,6 +120,41 @@ export default {
         }
     },
 };
+
+/**
+ * Runs the automated database backup and sends it to the log channel or admin.
+ */
+async function runAutoBackup(env: Env): Promise<void> {
+    try {
+        console.log("[BACKUP] Starting automated 6-hour database backup...");
+        const json = await BackupService.generate();
+        const buffer = new TextEncoder().encode(json);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const fileName = `backup-db-${timestamp}.json`;
+
+        // Target log channel fallback order: LOG_CHANNEL_ID -> ADMIN_CHANNEL_ID -> ADMIN_ID
+        const targetId = env.LOG_CHANNEL_ID || env.ADMIN_CHANNEL_ID || env.ADMIN_ID;
+        if (!targetId) {
+            console.error("[BACKUP] Cannot run auto-backup: No target chat ID configured.");
+            return;
+        }
+
+        await bot.api.sendDocument(Number(targetId), new InputFile(buffer, fileName), {
+            caption: `💾 <b>Database Auto-Backup (6 Hours)</b>\n📅 ${new Date().toISOString()}`,
+            parse_mode: "HTML"
+        });
+        console.log(`[BACKUP] Automated backup successfully sent to ${targetId}`);
+    } catch (e: any) {
+        console.error("[BACKUP] Error running automated backup:", e.message || e);
+        if (env.ADMIN_ID) {
+            try {
+                await bot.api.sendMessage(Number(env.ADMIN_ID), `❌ <b>Database Auto-Backup Failed!</b>\n\nError: <code>${e.message || e}</code>`, { parse_mode: "HTML" });
+            } catch (tgErr) {
+                console.error("[BACKUP] Failed to send error notification to admin:", tgErr);
+            }
+        }
+    }
+}
 
 /**
  * Checks if there is any pending work in the database that requires GHA to run.

@@ -6,5 +6,6 @@ compatibility_date = "2024-03-20"
 crons = [
   "*/10 * * * *",  # Tiap 10 Menit -> Memicu process_queue
   "*/30 * * * *",  # Tiap 30 Menit -> Memicu manual_sync
-  "30 2 * * *"     # Tiap hari 02:30 Pagi -> Memicu refresh-sessions
+  "30 2 * * *",    # Tiap hari 02:30 Pagi -> Memicu refresh-sessions
+  "0 */6 * * *"    # Tiap 6 Jam -> Memicu auto_backup
 ]
